@@ -1,0 +1,32 @@
+phases:
+  analyze:
+    provider: claude
+    max_tokens: 2000
+
+  plan:
+    max_rounds: 10
+    temperature: 0.7
+    max_tokens_per_turn: 2000
+
+  code:
+    provider: codex
+    temperature: 0.3
+    max_tokens: 8000
+
+  audit:
+    provider: claude
+    temperature: 0.2
+    max_tokens: 2000
+
+  resolve:
+    max_iterations: 5
+    max_rounds_per_iteration: 3
+
+safety_caps:
+  max_planning_rounds: 10
+  max_resolve_iterations: 5
+  stall_threshold: 2          # flag if same concerns repeat this many times
+
+output:
+  backup_files: true           # create .claudex.bak for overwritten files
+  require_approval: true       # present decision brief before writing files
