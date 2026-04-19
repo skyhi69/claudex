@@ -1,44 +1,95 @@
-"""Phase 2: Collaborative Planning — Claude and Codex debate the approach."""
+"""Phase 2: Collaborative Planning - Claude and Codex debate the approach."""
+
+from __future__ import annotations
 
 from pathlib import Path
 
-from ..models import SessionState, DebateRound, DebateMessage, PlanResult
-from ..providers.base import LLMProvider
 from ..consensus import ConsensusState
+from ..models import DebateMessage, DebateRound, PlanResult, SessionState
+from ..providers.base import LLMProvider
 from ..roles import build_expert_prompt
 
-# Keep last N rounds verbatim, summarize older ones
 RECENT_ROUNDS_FULL = 2
 
 
-def _trim_history(rounds: list[DebateRound], current_history: str) -> str:
+def _build_summary_line(consensus: ConsensusState, round_number: int, message: DebateMessage) -> str:
+    """Build a compact structured summary line for an older round message."""
+    block = consensus.extract_block(message.content) or {}
+    position = block.get("position")
+    if not isinstance(position, str) or not position.strip():
+        position = message.content[:150].replace("\n", " ").strip()
+
+    concerns = block.get("concerns", [])
+    if not isinstance(concerns, list):
+        concerns = []
+
+    label = "ARCHITECT" if message.agent == "claude" else "DEVELOPER"
+    concern_tail = ""
+    concise_concerns = [str(c).strip() for c in concerns[:2] if str(c).strip()]
+    if concise_concerns:
+        concern_tail = f" | concerns: {'; '.join(concise_concerns)}"
+
+    return f"[{label} R{round_number}]: {position.strip()}{concern_tail}"
+
+
+def _trim_history(rounds: list[DebateRound]) -> str:
     """Trim conversation history to prevent context bloat.
 
-    Keeps last RECENT_ROUNDS_FULL rounds verbatim. Older rounds get
-    replaced with a one-line position summary from their consensus block.
+    Older rounds use rolling summaries. Recent rounds remain verbatim.
     """
+    if not rounds:
+        return ""
+
     if len(rounds) <= RECENT_ROUNDS_FULL:
-        return current_history
+        recent_parts = []
+        for debate_round in rounds:
+            for message in debate_round.messages:
+                label = "ARCHITECT (Claude)" if message.agent == "claude" else "DEVELOPER (Codex)"
+                recent_parts.append(f"\n\n[{label}]: {message.content}")
+        return "".join(recent_parts).strip()
 
-    # Build a compact summary of older rounds
-    summary_parts = []
-    for r in rounds[:-RECENT_ROUNDS_FULL]:
-        for msg in r.messages:
-            # Extract position from the message (first 100 chars)
-            short = msg.content[:150].replace("\n", " ").strip()
-            label = "ARCHITECT" if msg.agent == "claude" else "DEVELOPER"
-            summary_parts.append(f"[{label} Round {r.round_number}]: {short}...")
+    # Older rounds: use rolling summaries
+    summary_lines = []
+    for debate_round in rounds[:-RECENT_ROUNDS_FULL]:
+        if debate_round.rolling_summary:
+            summary_lines.append(debate_round.rolling_summary)
 
-    # Build recent history from the last N rounds
+    # Recent rounds: verbatim
     recent_parts = []
-    for r in rounds[-RECENT_ROUNDS_FULL:]:
-        for msg in r.messages:
-            label = "ARCHITECT (Claude)" if msg.agent == "claude" else "DEVELOPER (Codex)"
-            recent_parts.append(f"\n\n[{label}]: {msg.content}")
+    for debate_round in rounds[-RECENT_ROUNDS_FULL:]:
+        for message in debate_round.messages:
+            label = "ARCHITECT (Claude)" if message.agent == "claude" else "DEVELOPER (Codex)"
+            recent_parts.append(f"\n\n[{label}]: {message.content}")
 
-    trimmed = "EARLIER ROUNDS (summarized):\n" + "\n".join(summary_parts)
-    trimmed += "\n\nRECENT DISCUSSION:" + "".join(recent_parts)
-    return trimmed
+    parts = []
+    if summary_lines:
+        parts.append("EARLIER ROUNDS (summarized):\n" + "\n".join(summary_lines))
+    if recent_parts:
+        parts.append("RECENT DISCUSSION:" + "".join(recent_parts))
+
+    return "\n\n".join(parts).strip()
+
+
+def _consensus_block_instructions(include_final_plan: bool) -> str:
+    """Return the standard consensus block instructions for planning prompts."""
+    final_plan_line = ', "final_plan": "concrete implementation plan"' if include_final_plan else ""
+    return (
+        "End with a consensus block:\n"
+        "```json\n"
+        '{"consensus_block": true, "agreed": true/false, "concerns": ["list any concerns"], '
+        f'"position": "one-line summary"{final_plan_line}}}\n'
+        "```"
+    )
+
+
+def _missing_block_reminder(agent_label: str, was_missing: bool) -> str:
+    """Return a terse reminder when the previous response missed the JSON block."""
+    if not was_missing:
+        return ""
+    return (
+        f"\nFORMAT REMINDER: Your previous {agent_label} response lacked the required JSON "
+        "consensus block. You MUST include it at the end of this response.\n"
+    )
 
 
 def run_planning(
@@ -47,19 +98,15 @@ def run_planning(
     codex: LLMProvider,
     roles_dir: Path,
     max_rounds: int = 10,
+    stall_threshold: int = 2,
     on_message=None,
 ) -> PlanResult:
-    """Run collaborative planning between Claude and Codex.
-
-    Claude proposes the approach, Codex evaluates and counter-proposes.
-    Continue until genuine consensus or progress stalls.
-    """
+    """Run collaborative planning between Claude and Codex."""
     analysis = state.analysis
-    consensus = ConsensusState()
+    consensus = ConsensusState(stall_threshold=stall_threshold)
     rounds: list[DebateRound] = []
-    alternatives_rejected: list[str] = []
+    alternatives_rejected: list = []
 
-    # Build expert prompts
     claude_prompt = build_expert_prompt(
         roles_dir / "architect.yaml",
         analysis.required_expertise,
@@ -71,7 +118,6 @@ def run_planning(
         state.task,
     )
 
-    # Context that both agents share
     shared_context = f"""TASK: {state.task}
 
 TASK ANALYSIS:
@@ -83,14 +129,13 @@ PROJECT CONTEXT:
 COMPLEXITY: {analysis.complexity}
 """
 
-    conversation_history = ""
+    final_plan = ""
+    claude_missed_block = False
+    codex_missed_block = False
 
     for round_num in range(1, max_rounds + 1):
         debate_round = DebateRound(round_number=round_num)
-
-        # Trim history for older rounds to prevent context bloat
-        if rounds:
-            conversation_history = _trim_history(rounds, conversation_history)
+        conversation_history = _trim_history(rounds)
 
         # --- Claude's turn (Architect) ---
         if round_num == 1:
@@ -103,11 +148,8 @@ You are starting the planning phase. Propose a technical approach:
 4. Potential risks or challenges
 
 Be specific and concrete. Your partner (Senior Developer) will evaluate your proposal.
-
-End with a consensus block:
-```json
-{{"consensus_block": true, "agreed": true/false, "concerns": ["list any concerns"], "position": "one-line summary"}}
-```"""
+{_missing_block_reminder("architect", claude_missed_block)}
+{_consensus_block_instructions(include_final_plan=False)}"""
         else:
             claude_input = f"""{shared_context}
 
@@ -115,14 +157,11 @@ CONVERSATION SO FAR:
 {conversation_history}
 
 Continue the planning discussion. Respond to your partner's points.
-If you agree with their assessment, say so with specific reasoning.
+If you agree, say so with specific reasoning.
 If you disagree, explain why with concrete alternatives.
-If consensus is reached, say so clearly — don't keep debating for its own sake.
-
-End with a consensus block:
-```json
-{{"consensus_block": true, "agreed": true/false, "concerns": ["list any concerns"], "position": "one-line summary"}}
-```"""
+If consensus is reached, say so clearly and include a concrete final_plan.
+{_missing_block_reminder("architect", claude_missed_block)}
+{_consensus_block_instructions(include_final_plan=True)}"""
 
         claude_response = claude.send(claude_input, system_prompt=claude_prompt)
         if not claude_response.success:
@@ -133,16 +172,18 @@ End with a consensus block:
         claude_msg = DebateMessage(agent="claude", role=analysis.claude_role, content=claude_response.content)
         debate_round.messages.append(claude_msg)
         state.add_message("claude", analysis.claude_role, claude_response.content)
-        conversation_history += f"\n\n[ARCHITECT (Claude)]: {claude_response.content}"
 
         if on_message:
             on_message("claude", analysis.claude_role, claude_response.content)
 
         # --- Codex's turn (Developer) ---
+        # Build history including Claude's latest message
+        codex_history = _trim_history(rounds + [debate_round])
+
         codex_input = f"""{shared_context}
 
 CONVERSATION SO FAR:
-{conversation_history}
+{codex_history}
 
 Evaluate the architect's proposal from an implementation perspective:
 - Is this practical to implement?
@@ -152,12 +193,9 @@ Evaluate the architect's proposal from an implementation perspective:
 
 Be honest. If the approach is solid, say so with reasoning.
 If you see problems, explain them with specific alternatives.
-If you agree, don't keep listing concerns just to seem thorough — say you agree and why.
-
-End with a consensus block:
-```json
-{{"consensus_block": true, "agreed": true/false, "concerns": ["list any concerns or empty"], "position": "one-line summary"}}
-```"""
+If you agree, don't keep listing concerns just to seem thorough.
+{_missing_block_reminder("developer", codex_missed_block)}
+{_consensus_block_instructions(include_final_plan=True)}"""
 
         codex_response = codex.send(codex_input, system_prompt=codex_prompt)
         if not codex_response.success:
@@ -168,52 +206,63 @@ End with a consensus block:
         codex_msg = DebateMessage(agent="codex", role=analysis.codex_role, content=codex_response.content)
         debate_round.messages.append(codex_msg)
         state.add_message("codex", analysis.codex_role, codex_response.content)
-        conversation_history += f"\n\n[DEVELOPER (Codex)]: {codex_response.content}"
 
         if on_message:
             on_message("codex", analysis.codex_role, codex_response.content)
+
+        # --- Build rolling summary for this round ---
+        summary_parts = []
+        for msg in debate_round.messages:
+            summary_parts.append(_build_summary_line(consensus, round_num, msg))
+        debate_round.rolling_summary = "\n".join(summary_parts)
 
         # --- Check consensus ---
         claude_status = consensus.check_consensus(claude_response.content)
         codex_status = consensus.check_consensus(codex_response.content)
 
+        # Track missing blocks for reminders
+        claude_missed_block = claude_status.get("source") == "missing_json"
+        codex_missed_block = codex_status.get("source") == "missing_json"
+
         all_concerns = claude_status["concerns"] + codex_status["concerns"]
-        debate_round.remaining_concerns = all_concerns
+        # Filter out the missing-block sentinel
+        real_concerns = [c for c in all_concerns if c != "CONSENSUS_BLOCK_MISSING"]
+        debate_round.remaining_concerns = real_concerns
 
         both_agree = claude_status["agreed"] and codex_status["agreed"]
 
-        # KEY FIX: agreed=true means consensus, even if concerns are listed.
-        # Concerns are informational notes, not blockers.
+        # Capture final_plan if provided
+        for status in (claude_status, codex_status):
+            if status.get("final_plan"):
+                final_plan = status["final_plan"]
+
+        # Extract rejected alternatives
+        for resp_text in (claude_response.content, codex_response.content):
+            block = consensus.extract_block(resp_text) or {}
+            rejected = block.get("rejected_alternatives", [])
+            if isinstance(rejected, list):
+                alternatives_rejected.extend(str(r) for r in rejected)
+
         if both_agree:
             debate_round.consensus_reached = True
             rounds.append(debate_round)
-            if on_message and all_concerns:
-                on_message("system", "Claudex", f"Consensus reached with {len(all_concerns)} noted concern(s) — proceeding.")
+            if on_message and real_concerns:
+                on_message("system", "Claudex", f"Consensus reached with {len(real_concerns)} noted concern(s).")
             break
 
         # Check for stall
-        is_stalled = consensus.update(all_concerns)
+        is_stalled = consensus.update(real_concerns)
         if is_stalled:
             if on_message:
-                on_message("system", "Claudex", "Progress has stalled — same concerns repeating. Moving forward with current plan.")
-            debate_round.consensus_reached = True  # forced consensus
+                on_message("system", "Claudex", "Progress has stalled. Moving forward with current plan.")
+            debate_round.consensus_reached = True
             rounds.append(debate_round)
             break
 
-        # Track rejected alternatives from the consensus JSON
-        for status in (claude_status, codex_status):
-            if isinstance(status, dict):
-                # Check for rejected_alternatives in the JSON block
-                json_block = consensus._extract_json(
-                    claude_response.content if status == claude_status else codex_response.content
-                )
-                if json_block and "rejected_alternatives" in json_block:
-                    alternatives_rejected.extend(json_block["rejected_alternatives"])
-
         rounds.append(debate_round)
 
-    # Build the agreed plan — use trimmed history for the code phase
-    agreed_plan = _trim_history(rounds, conversation_history) if rounds else conversation_history
+    # Build agreed plan — prefer final_plan from consensus, fall back to trimmed history
+    agreed_plan = final_plan if final_plan else _trim_history(rounds)
 
     return PlanResult(
         agreed_plan=agreed_plan,

@@ -1,5 +1,7 @@
 """Consensus detection and stall detection for multi-agent debate."""
 
+from __future__ import annotations
+
 import json
 import re
 from dataclasses import dataclass, field
@@ -8,37 +10,57 @@ from dataclasses import dataclass, field
 @dataclass
 class ConsensusState:
     """Tracks consensus progress across debate rounds."""
-    concerns_history: list[list[str]] = field(default_factory=list)
+
+    concerns_history: list[list] = field(default_factory=list)
     stall_count: int = 0
     stall_threshold: int = 2
 
     def check_consensus(self, response_text: str) -> dict:
         """Parse a response to determine consensus status.
 
-        Returns dict with:
+        Returns a dict with:
             - agreed: bool
-            - concerns: list[str]
+            - concerns: list
             - position_summary: str
-            - source: "json" | "text"
+            - final_plan: str
+            - source: "json" | "missing_json"
 
-        Key behavior: agreed=true WITH concerns is still agreement.
-        Concerns are informational notes, not blockers — only agreed=false
-        means the agent disagrees.
+        The planning prompts require a JSON consensus block. If it is missing,
+        treat that as prompt non-compliance rather than inferring agreement
+        from free-form prose.
         """
         json_block = self._extract_json(response_text)
-        if json_block:
+        if json_block is None:
             return {
-                "agreed": json_block.get("agreed", False),
-                "concerns": json_block.get("concerns", []),
-                "position_summary": json_block.get("position", response_text[:200]),
-                "source": "json",
+                "agreed": False,
+                "concerns": ["CONSENSUS_BLOCK_MISSING"],
+                "position_summary": "Consensus block missing from response.",
+                "final_plan": "",
+                "source": "missing_json",
             }
 
-        return self._infer_from_text(response_text)
+        concerns = json_block.get("concerns", [])
+        if not isinstance(concerns, list):
+            concerns = []
 
-    def update(self, concerns: list[str]) -> bool:
+        position = json_block.get("position", "")
+        if not isinstance(position, str) or not position.strip():
+            position = response_text[:200].replace("\n", " ").strip()
+
+        final_plan = json_block.get("final_plan", "")
+        if not isinstance(final_plan, str):
+            final_plan = ""
+
+        return {
+            "agreed": bool(json_block.get("agreed", False)),
+            "concerns": [str(c) for c in concerns if str(c).strip()],
+            "position_summary": position.strip(),
+            "final_plan": final_plan.strip(),
+            "source": "json",
+        }
+
+    def update(self, concerns: list) -> bool:
         """Update stall detection with latest concerns. Returns True if stalled."""
-        # Normalize concerns for comparison
         normalized = [self._normalize(c) for c in concerns]
         self.concerns_history.append(normalized)
 
@@ -47,112 +69,59 @@ class ConsensusState:
             curr = set(normalized)
             if prev and curr:
                 overlap = len(prev & curr) / max(len(prev | curr), 1)
-                if overlap > 0.5:  # >50% overlap = stalling
+                if overlap > 0.5:
                     self.stall_count += 1
                 else:
                     self.stall_count = 0
             elif not prev and not curr:
-                # Both empty = already agreed, not stalling
                 self.stall_count = 0
             else:
                 self.stall_count = 0
 
         return self.stall_count >= self.stall_threshold
 
-    def _normalize(self, concern: str) -> str:
-        """Normalize a concern string for comparison.
+    def extract_block(self, response_text: str) -> dict | None:
+        """Expose raw consensus JSON extraction for planning helpers."""
+        return self._extract_json(response_text)
 
-        Strips whitespace, lowercases, removes filler words to detect
-        semantically duplicate concerns across rounds.
-        """
-        c = concern.lower().strip()
-        # Remove common filler
+    def _normalize(self, concern: str) -> str:
+        """Normalize a concern string for comparison."""
+        normalized = concern.lower().strip()
         for word in ["should", "would", "could", "might", "also", "the", "a", "an"]:
-            c = c.replace(f" {word} ", " ")
-        # Collapse whitespace
-        c = re.sub(r'\s+', ' ', c).strip()
-        return c
+            normalized = normalized.replace(f" {word} ", " ")
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
 
     def _extract_json(self, text: str) -> dict | None:
-        """Extract the LAST valid consensus JSON block from the response.
+        """Extract the last valid consensus JSON block from the response.
 
         Agents are prompted to include a block with consensus_block: true.
-        We scan for the LAST matching block to avoid template echoes
-        at the start of the response.
+        We prefer the last matching sentinel block to avoid template echoes.
         """
-        candidates = []
+        candidates: list[dict] = []
 
-        # Look for ```json ... ``` blocks
-        for match in re.finditer(r'```json\s*\n?(.*?)\n?\s*```', text, re.DOTALL):
+        for match in re.finditer(r"```json\s*\n?(.*?)\n?\s*```", text, re.DOTALL):
             try:
                 data = json.loads(match.group(1))
-                if isinstance(data, dict) and "agreed" in data:
-                    candidates.append(data)
             except json.JSONDecodeError:
                 continue
+            if isinstance(data, dict) and "agreed" in data:
+                candidates.append(data)
 
-        # Also scan for bare JSON objects with "agreed"
-        # Use raw_decode to find valid JSON at each { position
         decoder = json.JSONDecoder()
-        for match in re.finditer(r'\{', text):
+        for match in re.finditer(r"\{", text):
             try:
                 data, _ = decoder.raw_decode(text, match.start())
-                if isinstance(data, dict) and "agreed" in data:
-                    candidates.append(data)
             except (json.JSONDecodeError, ValueError):
                 continue
+            if isinstance(data, dict) and "agreed" in data:
+                candidates.append(data)
 
         if not candidates:
             return None
 
-        # Prefer blocks with consensus_block sentinel
         sentinel_blocks = [c for c in candidates if c.get("consensus_block")]
         if sentinel_blocks:
-            return sentinel_blocks[-1]  # last sentinel block
+            return sentinel_blocks[-1]
 
-        # Fall back to last block with "agreed"
         return candidates[-1]
-
-    def _infer_from_text(self, text: str) -> dict:
-        """Infer consensus status from natural language response.
-
-        Used only when no JSON block is found. More lenient than before —
-        hedging words like "however" don't automatically mean disagreement.
-        """
-        lower = text.lower()
-
-        # Strong agreement signals
-        agree_signals = [
-            "i agree", "looks good", "that works", "consensus reached",
-            "i'm on board", "let's go with", "approved", "no concerns",
-            "solid approach", "well thought out", "the approach is solid",
-            "the plan is solid", "proceed", "implementing as specified",
-        ]
-
-        # Strong disagreement signals (not hedging words)
-        disagree_signals = [
-            "i disagree", "i reject", "won't work", "fundamentally flawed",
-            "cannot accept", "must change", "blocking concern",
-            "this approach fails",
-        ]
-
-        agree_score = sum(1 for s in agree_signals if s in lower)
-        disagree_score = sum(1 for s in disagree_signals if s in lower)
-
-        # Ratio-based, not zero-tolerance
-        agreed = agree_score > 0 and agree_score > disagree_score * 2
-
-        # Extract concerns
-        concerns = []
-        for sentence in re.split(r'[.!?\n]', text):
-            sentence = sentence.strip()
-            if any(kw in sentence.lower() for kw in ["concern", "risk", "caveat", "guard"]):
-                if sentence and len(sentence) > 10:
-                    concerns.append(sentence)
-
-        return {
-            "agreed": agreed,
-            "concerns": concerns,
-            "position_summary": text[:200],
-            "source": "text",
-        }
