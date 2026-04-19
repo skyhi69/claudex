@@ -5,6 +5,15 @@ import os
 import sys
 from pathlib import Path
 
+# Fix Windows Unicode output issues
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
@@ -20,7 +29,7 @@ CLAUDEX_HOME = Path(__file__).parent.parent
 # Projects base directory
 PROJECTS_DIR = Path(os.path.expanduser("~")) / "Claude_Projects"
 
-console = Console()
+console = Console(force_terminal=True)
 
 # Agent display colors
 AGENT_STYLES = {

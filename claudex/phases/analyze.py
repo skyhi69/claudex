@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 
+from ..memory import load_project_context, get_lessons_prompt, get_recent_sessions
 from ..models import AnalysisResult, SessionState
 from ..providers.base import LLMProvider
 from ..roles import detect_expertise, get_role_description
@@ -42,6 +43,11 @@ def run_analysis(state: SessionState, claude: LLMProvider) -> AnalysisResult:
     # Scan project directory
     project_context = _scan_project(state.target_dir)
 
+    # Load memory: project context, lessons, recent sessions
+    memory_context = load_project_context(state.target_dir)
+    lessons = get_lessons_prompt(state.target_dir)
+    recent = get_recent_sessions(state.target_dir)
+
     # Ask Claude for task analysis
     prompt = f"""Analyze this coding task and provide a brief assessment.
 
@@ -49,6 +55,9 @@ TASK: {state.task}
 
 PROJECT CONTEXT:
 {project_context}
+{memory_context}
+{recent}
+{lessons}
 
 DETECTED EXPERTISE NEEDED: {role_desc}
 

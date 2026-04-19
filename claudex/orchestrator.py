@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .config import ClaudexConfig
 from .file_writer import write_files
+from .memory import save_session, auto_learn, get_lessons_prompt, load_project_context, get_recent_sessions
 from .models import DecisionBrief, NodeType, SessionState
 from .phases.analyze import run_analysis
 from .phases.audit import run_audit
@@ -34,6 +35,14 @@ class Orchestrator:
 
         while state.current_node not in (NodeType.DONE, NodeType.FAILED):
             state = self._step(state)
+
+        # Save session and learn from it
+        try:
+            session_path = save_session(state)
+            self.on_message("system", "Claudex", f"Session saved to {session_path.name}")
+            auto_learn(state)
+        except Exception as e:
+            self.on_message("system", "Claudex", f"Warning: could not save session: {e}")
 
         return state
 
