@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import ClaudexConfig
 from .file_writer import write_files
-from .memory import save_session, auto_learn, get_lessons_prompt, load_project_context, get_recent_sessions
+from .memory import save_session, auto_learn
 from .models import DecisionBrief, NodeType, SessionState
 from .phases.analyze import run_analysis
 from .phases.audit import run_audit

@@ -69,6 +69,8 @@ class ClaudeProvider(LLMProvider):
 
     def _parse_output(self, raw: str) -> str:
         """Extract text content from claude's JSON output."""
+        if not raw:
+            return ""
         try:
             data = json.loads(raw)
             if isinstance(data, dict):

@@ -3,8 +3,22 @@
 import json
 import re
 
+from ..memory import select_relevant_lessons, format_lessons_for_prompt, CODE_LESSON_LIMIT, CODE_LESSON_CHARS
 from ..models import SessionState, CodeResult, FileOutput
 from ..providers.base import LLMProvider
+
+
+def _get_code_lessons(state: SessionState) -> str:
+    """Get relevant antipatterns for the code phase (max 400 chars)."""
+    if not state.target_dir:
+        return ""
+    relevant = select_relevant_lessons(
+        state.task, state.target_dir,
+        category="antipattern",
+        limit=CODE_LESSON_LIMIT,
+        max_chars=CODE_LESSON_CHARS,
+    )
+    return format_lessons_for_prompt(relevant)
 
 
 def run_coding(
@@ -54,6 +68,7 @@ REQUIREMENTS:
 - No TODO stubs or placeholder comments
 - Each file must be immediately runnable/importable
 
+{_get_code_lessons(state)}
 OUTPUT FORMAT:
 For each file, use this exact format:
 

@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from ..memory import load_project_context, load_lessons
+from ..memory import load_project_context, select_relevant_lessons, format_lessons_for_prompt, ANALYZE_LESSON_LIMIT, ANALYZE_LESSON_CHARS
 from ..models import AnalysisResult, SessionState
 from ..providers.base import LLMProvider
 from ..roles import detect_expertise, get_role_description
@@ -43,18 +43,16 @@ def run_analysis(state: SessionState, claude: LLMProvider) -> AnalysisResult:
     # Scan project directory
     project_context = _scan_project(state.target_dir)
 
-    # Load memory — lightweight only
-    # Project context: always (user-controlled, small)
-    # Lessons: only antipatterns (what to avoid)
-    # Recent sessions: skip (saves tokens, agents don't need history by default)
+    # Load memory — lightweight, relevance-scored
     memory_context = load_project_context(state.target_dir)
 
-    lessons_data = load_lessons()
-    antipatterns = lessons_data.get("antipatterns", [])[-5:]  # last 5 only
-    lessons_section = ""
-    if antipatterns:
-        lessons_section = "\nLESSONS - Avoid these past mistakes:\n"
-        lessons_section += "\n".join(f"  - {a['lesson']}" for a in antipatterns)
+    relevant = select_relevant_lessons(
+        state.task, state.target_dir,
+        category="antipattern",
+        limit=ANALYZE_LESSON_LIMIT,
+        max_chars=ANALYZE_LESSON_CHARS,
+    )
+    lessons_section = format_lessons_for_prompt(relevant, "LESSONS - Avoid these past mistakes:")
 
     # Ask Claude for task analysis
     prompt = f"""Analyze this coding task and provide a brief assessment.
