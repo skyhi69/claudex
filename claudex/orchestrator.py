@@ -1,5 +1,6 @@
 """Claudex orchestrator — graph-based state machine for the multi-agent pipeline."""
 
+import os
 from pathlib import Path
 
 from .models import SessionState, NodeType, DecisionBrief
@@ -35,6 +36,9 @@ class Orchestrator:
             Final SessionState with all results
         """
         state = SessionState(task=task, target_dir=target_dir)
+
+        # Set project dir for codex provider (needs a git repo to run in)
+        os.environ["CLAUDEX_PROJECT_DIR"] = str(target_dir)
 
         # Walk the state machine
         while state.current_node not in (NodeType.DONE, NodeType.FAILED):

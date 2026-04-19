@@ -16,15 +16,9 @@ def run_audit(
 
     Blind = Claude sees the code and the plan, but NOT the coder's
     explanation of what they did. This prevents anchoring bias.
-
-    Args:
-        state: Session state with code result
-        claude: Claude CLI provider
-        on_message: Optional callback for live output
     """
     code_result = state.code_result
 
-    # Format code for review
     code_display = ""
     for f in code_result.files:
         code_display += f"\n--- {f.path} ({f.action}) ---\n{f.content}\n"
@@ -37,7 +31,7 @@ You have NOT seen their explanation of what they did — form your own opinion f
 ORIGINAL TASK: {state.task}
 
 AGREED PLAN:
-{state.plan.agreed_plan[-2000:]}
+{state.plan.agreed_plan[-2000:] if state.plan else '(no plan — simple task fast path)'}
 
 GENERATED CODE:
 {code_display}
@@ -52,9 +46,10 @@ Review for:
 Be thorough but fair. If the code is solid, say so.
 If there are issues, be specific about what's wrong and how to fix it.
 
-End your review with a verdict:
-APPROVED — if the code is ready to ship
-REJECTED — if changes are needed (list specific issues)
+IMPORTANT: End your review with a verdict on its own line, exactly like this:
+VERDICT: APPROVED
+or
+VERDICT: REJECTED
 """
 
     system_prompt = f"""You are a Technical Architect conducting a blind code review.
@@ -76,16 +71,12 @@ Expert domains: {', '.join(state.analysis.required_expertise)}"""
     if on_message:
         on_message("claude", "Architect (Audit)", response.content)
 
-    # Determine if approved or rejected
     approved = _detect_approval(response.content)
-
-    # Extract specific issues
     issues = _extract_issues(response.content)
 
-    # Build feedback for coder (if rejected)
     feedback = ""
     if not approved:
-        feedback = response.content  # full review as feedback
+        feedback = response.content
 
     return AuditResult(
         approved=approved,
@@ -96,27 +87,43 @@ Expert domains: {', '.join(state.analysis.required_expertise)}"""
 
 
 def _detect_approval(text: str) -> bool:
-    """Determine if the audit approved or rejected the code."""
-    lower = text.lower()
+    """Determine if the audit approved or rejected the code.
 
-    # Look for explicit verdict markers
-    if "approved" in lower and "rejected" not in lower:
+    Uses last-match strategy: find the last occurrence of
+    VERDICT: APPROVED or VERDICT: REJECTED. Falls back to
+    scanning for standalone APPROVED/REJECTED lines.
+    """
+    # Strategy 1: Look for explicit VERDICT: line (last match wins)
+    verdict_matches = list(re.finditer(
+        r'VERDICT:\s*(APPROVED|REJECTED)',
+        text,
+        re.IGNORECASE,
+    ))
+    if verdict_matches:
+        last = verdict_matches[-1]
+        return last.group(1).upper() == "APPROVED"
+
+    # Strategy 2: Scan lines from the bottom for standalone verdict words
+    lines = text.strip().split("\n")
+    for line in reversed(lines):
+        stripped = line.strip().strip("*#- ")
+        if stripped.upper() in ("APPROVED", "REJECTED"):
+            return stripped.upper() == "APPROVED"
+        if stripped.upper().startswith("VERDICT"):
+            return "APPROVED" in stripped.upper()
+
+    # Strategy 3: Last resort — count occurrences, but only in
+    # verdict-like contexts (not in prose about "rejected alternatives")
+    approve_count = len(re.findall(r'\bapproved\b', text, re.IGNORECASE))
+    reject_count = len(re.findall(r'\brejected\b', text, re.IGNORECASE))
+
+    # Only trust this if one clearly dominates
+    if approve_count > 0 and reject_count == 0:
         return True
-    if "rejected" in lower:
+    if reject_count > 0 and approve_count == 0:
         return False
 
-    # Look for verdict section
-    lines = text.split("\n")
-    for line in reversed(lines):
-        line_lower = line.strip().lower()
-        if line_lower.startswith("verdict"):
-            return "approved" in line_lower and "rejected" not in line_lower
-        if line_lower.startswith("approved"):
-            return True
-        if line_lower.startswith("rejected"):
-            return False
-
-    # Default to not approved if unclear
+    # Default to not approved if ambiguous
     return False
 
 
@@ -124,7 +131,6 @@ def _extract_issues(text: str) -> list[AuditIssue]:
     """Extract specific issues from the audit review."""
     issues = []
 
-    # Look for numbered or bulleted issues
     issue_patterns = [
         r'(?:issue|problem|bug|vulnerability|concern)\s*(?:\d+)?[:.]\s*(.+)',
         r'[-*]\s*(?:CRITICAL|HIGH|MEDIUM|LOW)[:.]\s*(.+)',
@@ -133,7 +139,6 @@ def _extract_issues(text: str) -> list[AuditIssue]:
     for pattern in issue_patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
         for match in matches:
-            # Try to determine severity
             severity = "medium"
             match_lower = match.lower()
             if any(kw in match_lower for kw in ["critical", "security", "vulnerability", "injection"]):
@@ -145,7 +150,7 @@ def _extract_issues(text: str) -> list[AuditIssue]:
 
             issues.append(AuditIssue(
                 severity=severity,
-                file="",  # would need smarter parsing to extract
+                file="",
                 issue=match.strip(),
                 suggested_fix="",
             ))

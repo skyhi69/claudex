@@ -18,22 +18,18 @@ class ClaudeProvider(LLMProvider):
     def send(self, prompt: str, system_prompt: str = "") -> LLMResponse:
         """Send a prompt via claude -p and capture the response.
 
-        Uses --output-format json for reliable parsing, then extracts
-        the text content from the structured response.
+        Passes prompt via stdin to avoid command-line length limits.
         """
         full_prompt = prompt
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
 
-        cmd = [
-            "claude", "-p",
-            "--output-format", "json",
-            full_prompt,
-        ]
+        cmd = ["claude", "-p", "--output-format", "json"]
 
         try:
             result = subprocess.run(
                 cmd,
+                input=full_prompt,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 min max per call
@@ -75,13 +71,10 @@ class ClaudeProvider(LLMProvider):
         """Extract text content from claude's JSON output."""
         try:
             data = json.loads(raw)
-            # claude -p --output-format json returns {"result": "..."} or similar
             if isinstance(data, dict):
-                # Try common output fields
                 for key in ("result", "content", "text", "response"):
                     if key in data:
                         return str(data[key])
-                # If it's a messages-style response
                 if "messages" in data:
                     messages = data["messages"]
                     if messages:
@@ -90,5 +83,4 @@ class ClaudeProvider(LLMProvider):
                             return str(last["content"])
             return raw.strip()
         except (json.JSONDecodeError, KeyError, IndexError):
-            # If JSON parsing fails, return raw text
             return raw.strip()

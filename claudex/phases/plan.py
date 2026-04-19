@@ -7,6 +7,39 @@ from ..providers.base import LLMProvider
 from ..consensus import ConsensusState
 from ..roles import build_expert_prompt
 
+# Keep last N rounds verbatim, summarize older ones
+RECENT_ROUNDS_FULL = 2
+
+
+def _trim_history(rounds: list[DebateRound], current_history: str) -> str:
+    """Trim conversation history to prevent context bloat.
+
+    Keeps last RECENT_ROUNDS_FULL rounds verbatim. Older rounds get
+    replaced with a one-line position summary from their consensus block.
+    """
+    if len(rounds) <= RECENT_ROUNDS_FULL:
+        return current_history
+
+    # Build a compact summary of older rounds
+    summary_parts = []
+    for r in rounds[:-RECENT_ROUNDS_FULL]:
+        for msg in r.messages:
+            # Extract position from the message (first 100 chars)
+            short = msg.content[:150].replace("\n", " ").strip()
+            label = "ARCHITECT" if msg.agent == "claude" else "DEVELOPER"
+            summary_parts.append(f"[{label} Round {r.round_number}]: {short}...")
+
+    # Build recent history from the last N rounds
+    recent_parts = []
+    for r in rounds[-RECENT_ROUNDS_FULL:]:
+        for msg in r.messages:
+            label = "ARCHITECT (Claude)" if msg.agent == "claude" else "DEVELOPER (Codex)"
+            recent_parts.append(f"\n\n[{label}]: {msg.content}")
+
+    trimmed = "EARLIER ROUNDS (summarized):\n" + "\n".join(summary_parts)
+    trimmed += "\n\nRECENT DISCUSSION:" + "".join(recent_parts)
+    return trimmed
+
 
 def run_planning(
     state: SessionState,
@@ -20,14 +53,6 @@ def run_planning(
 
     Claude proposes the approach, Codex evaluates and counter-proposes.
     Continue until genuine consensus or progress stalls.
-
-    Args:
-        state: Current session state (with analysis results)
-        claude: Claude CLI provider
-        codex: Codex CLI provider
-        roles_dir: Path to role YAML files
-        max_rounds: Safety cap on planning rounds
-        on_message: Optional callback(agent, role, content) for live output
     """
     analysis = state.analysis
     consensus = ConsensusState()
@@ -63,6 +88,10 @@ COMPLEXITY: {analysis.complexity}
     for round_num in range(1, max_rounds + 1):
         debate_round = DebateRound(round_number=round_num)
 
+        # Trim history for older rounds to prevent context bloat
+        if rounds:
+            conversation_history = _trim_history(rounds, conversation_history)
+
         # --- Claude's turn (Architect) ---
         if round_num == 1:
             claude_input = f"""{shared_context}
@@ -73,7 +102,12 @@ You are starting the planning phase. Propose a technical approach:
 3. Libraries and patterns to use
 4. Potential risks or challenges
 
-Be specific and concrete. Your partner (Senior Developer) will evaluate your proposal."""
+Be specific and concrete. Your partner (Senior Developer) will evaluate your proposal.
+
+End with a consensus block:
+```json
+{{"consensus_block": true, "agreed": true/false, "concerns": ["list any concerns"], "position": "one-line summary"}}
+```"""
         else:
             claude_input = f"""{shared_context}
 
@@ -82,7 +116,13 @@ CONVERSATION SO FAR:
 
 Continue the planning discussion. Respond to your partner's points.
 If you agree with their assessment, say so with specific reasoning.
-If you disagree, explain why with concrete alternatives."""
+If you disagree, explain why with concrete alternatives.
+If consensus is reached, say so clearly — don't keep debating for its own sake.
+
+End with a consensus block:
+```json
+{{"consensus_block": true, "agreed": true/false, "concerns": ["list any concerns"], "position": "one-line summary"}}
+```"""
 
         claude_response = claude.send(claude_input, system_prompt=claude_prompt)
         if not claude_response.success:
@@ -111,7 +151,13 @@ Evaluate the architect's proposal from an implementation perspective:
 - Do you agree with the approach?
 
 Be honest. If the approach is solid, say so with reasoning.
-If you see problems, explain them with specific alternatives."""
+If you see problems, explain them with specific alternatives.
+If you agree, don't keep listing concerns just to seem thorough — say you agree and why.
+
+End with a consensus block:
+```json
+{{"consensus_block": true, "agreed": true/false, "concerns": ["list any concerns or empty"], "position": "one-line summary"}}
+```"""
 
         codex_response = codex.send(codex_input, system_prompt=codex_prompt)
         if not codex_response.success:
@@ -136,9 +182,13 @@ If you see problems, explain them with specific alternatives."""
 
         both_agree = claude_status["agreed"] and codex_status["agreed"]
 
-        if both_agree and not all_concerns:
+        # KEY FIX: agreed=true means consensus, even if concerns are listed.
+        # Concerns are informational notes, not blockers.
+        if both_agree:
             debate_round.consensus_reached = True
             rounds.append(debate_round)
+            if on_message and all_concerns:
+                on_message("system", "Claudex", f"Consensus reached with {len(all_concerns)} noted concern(s) — proceeding.")
             break
 
         # Check for stall
@@ -150,15 +200,20 @@ If you see problems, explain them with specific alternatives."""
             rounds.append(debate_round)
             break
 
-        # Track rejected alternatives
-        for concern in all_concerns:
-            if "instead" in concern.lower() or "alternative" in concern.lower():
-                alternatives_rejected.append(concern)
+        # Track rejected alternatives from the consensus JSON
+        for status in (claude_status, codex_status):
+            if isinstance(status, dict):
+                # Check for rejected_alternatives in the JSON block
+                json_block = consensus._extract_json(
+                    claude_response.content if status == claude_status else codex_response.content
+                )
+                if json_block and "rejected_alternatives" in json_block:
+                    alternatives_rejected.extend(json_block["rejected_alternatives"])
 
         rounds.append(debate_round)
 
-    # Build the agreed plan from the last round's discussion
-    agreed_plan = conversation_history
+    # Build the agreed plan — use trimmed history for the code phase
+    agreed_plan = _trim_history(rounds, conversation_history) if rounds else conversation_history
 
     return PlanResult(
         agreed_plan=agreed_plan,

@@ -30,15 +30,20 @@ class LLMProvider(ABC):
     def is_available(self) -> bool:
         """Check if the CLI tool is installed and accessible."""
         import subprocess
+        import shutil
+        # First check if the command exists on PATH
+        if shutil.which(self._cli_command()) is None:
+            return False
         try:
             result = subprocess.run(
                 [self._cli_command(), "--version"],
                 capture_output=True,
                 text=True,
                 timeout=10,
+                stdin=subprocess.DEVNULL,
             )
             return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             return False
 
     @abstractmethod

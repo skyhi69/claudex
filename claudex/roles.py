@@ -90,10 +90,11 @@ Apply this expertise to evaluate, plan, and (if you are the developer) implement
 {task}
 
 RESPONSE FORMAT:
-After your analysis/response, include a consensus block:
+After your analysis/response, you MUST include a consensus block at the END of your response:
 ```json
-{{"agreed": true/false, "concerns": ["list of specific concerns if any"], "position": "one-line summary of your position"}}
+{{"consensus_block": true, "agreed": true/false, "concerns": ["list specific concerns, or empty if none"], "position": "one-line summary of your position"}}
 ```
+IMPORTANT: agreed=true means you support the approach. You can still list concerns as informational notes — concerns don't block agreement. Only set agreed=false if you genuinely believe the approach should change.
 """
     return expert_prompt
 

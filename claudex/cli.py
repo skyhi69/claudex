@@ -1,17 +1,24 @@
 """Claudex CLI — the user-facing entry point."""
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.text import Text
+from rich.prompt import Prompt, Confirm
 from rich.rule import Rule
 
 from .config import load_config
 from .orchestrator import Orchestrator
 
+
+# Claudex install directory (for finding config.yaml and roles/)
+CLAUDEX_HOME = Path(__file__).parent.parent
+
+# Projects base directory
+PROJECTS_DIR = Path(os.path.expanduser("~")) / "Claude_Projects"
 
 console = Console()
 
@@ -47,6 +54,65 @@ def on_message(agent: str, role: str, content: str):
         ))
 
 
+def pick_project() -> Path:
+    """Interactive project picker — list existing projects or create new."""
+    console.print()
+    console.print(Rule("[bold magenta]Claudex[/bold magenta]", style="magenta"))
+    console.print()
+
+    # Scan for existing projects
+    projects = []
+    if PROJECTS_DIR.exists():
+        for item in sorted(PROJECTS_DIR.iterdir()):
+            if item.is_dir() and not item.name.startswith("."):
+                projects.append(item)
+
+    # Display options
+    console.print("[bold]Which project are we working on?[/bold]\n")
+    for i, proj in enumerate(projects, 1):
+        # Check for CLAUDE.md to show a description
+        claude_md = proj / "CLAUDE.md"
+        desc = ""
+        if claude_md.exists():
+            first_line = claude_md.read_text(encoding="utf-8", errors="replace").strip().split("\n")[0]
+            desc = f" [dim]— {first_line.lstrip('# ').strip()[:60]}[/dim]"
+        console.print(f"  [bold]{i}[/bold]. {proj.name}{desc}")
+
+    console.print(f"  [bold]{len(projects) + 1}[/bold]. [green]Create a new project[/green]")
+    console.print(f"  [bold]{len(projects) + 2}[/bold]. [dim]Use a custom directory[/dim]")
+    console.print()
+
+    choice = Prompt.ask(
+        "Select",
+        choices=[str(i) for i in range(1, len(projects) + 3)],
+    )
+    choice_num = int(choice)
+
+    if choice_num <= len(projects):
+        # Existing project
+        return projects[choice_num - 1]
+    elif choice_num == len(projects) + 1:
+        # Create new project
+        name = Prompt.ask("Project name")
+        new_dir = PROJECTS_DIR / name
+        new_dir.mkdir(parents=True, exist_ok=True)
+        console.print(f"  Created [bold]{new_dir}[/bold]")
+        return new_dir
+    else:
+        # Custom directory
+        custom = Prompt.ask("Directory path")
+        custom_path = Path(custom).resolve()
+        custom_path.mkdir(parents=True, exist_ok=True)
+        return custom_path
+
+
+def get_task() -> str:
+    """Prompt user for the task if not provided as argument."""
+    console.print()
+    task = Prompt.ask("[bold]What should we build?[/bold]")
+    return task
+
+
 def display_decision_brief(state):
     """Display the final decision brief to the user."""
     brief = state.decision_brief
@@ -56,7 +122,6 @@ def display_decision_brief(state):
     console.print()
     console.print(Rule("Decision Brief", style="bold magenta"))
 
-    # What was built
     if brief.what_was_built:
         console.print(Panel(
             brief.what_was_built,
@@ -64,7 +129,6 @@ def display_decision_brief(state):
             border_style="blue",
         ))
 
-    # Files to be written
     if brief.files_summary:
         file_lines = []
         for f in brief.files_summary:
@@ -76,7 +140,6 @@ def display_decision_brief(state):
             border_style="green",
         ))
 
-    # Alternatives rejected
     if brief.alternatives_rejected:
         console.print(Panel(
             "\n".join(f"  - {a}" for a in brief.alternatives_rejected[:5]),
@@ -84,7 +147,6 @@ def display_decision_brief(state):
             border_style="dim",
         ))
 
-    # Unresolved concerns
     if brief.unresolved_concerns:
         console.print(Panel(
             "\n".join(f"  ! {c}" for c in brief.unresolved_concerns),
@@ -92,14 +154,12 @@ def display_decision_brief(state):
             border_style="yellow",
         ))
 
-    # Audit status
     if state.audit_results:
         last_audit = state.audit_results[-1]
         status = "[bold green]APPROVED[/bold green]" if last_audit.approved else "[bold red]NOT FULLY APPROVED[/bold red]"
         total_audits = len(state.audit_results)
         console.print(f"\n  Audit status: {status} (after {total_audits} review(s))")
 
-    # Session stats
     rounds = len(state.plan.rounds) if state.plan else 0
     iterations = state.resolve_iteration
     console.print(f"  Planning rounds: {rounds} | Fix iterations: {iterations}")
@@ -109,8 +169,7 @@ def display_decision_brief(state):
 def prompt_approval() -> bool:
     """Ask the user whether to write files to disk."""
     console.print(Rule(style="dim"))
-    response = console.input("[bold]Write these files to disk? [/bold][dim](y/n)[/dim] ").strip().lower()
-    return response in ("y", "yes")
+    return Confirm.ask("[bold]Write these files to disk?[/bold]", default=True)
 
 
 def main(args=None):
@@ -121,13 +180,15 @@ def main(args=None):
     )
     parser.add_argument(
         "task",
-        help="The coding task to accomplish",
+        nargs="?",
+        default=None,
+        help="The coding task (if omitted, you'll be asked interactively)",
     )
     parser.add_argument(
         "--dir", "-d",
         type=Path,
-        default=Path.cwd(),
-        help="Target project directory (default: current directory)",
+        default=None,
+        help="Target project directory (if omitted, you'll pick interactively)",
     )
     parser.add_argument(
         "--config", "-c",
@@ -138,7 +199,13 @@ def main(args=None):
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Show full debate transcripts",
+        default=True,
+        help="Show full debate transcripts (default: on)",
+    )
+    parser.add_argument(
+        "--quiet", "-q",
+        action="store_true",
+        help="Only show status updates, not full debate",
     )
     parser.add_argument(
         "--dry-run",
@@ -160,13 +227,26 @@ def main(args=None):
 
     parsed = parser.parse_args(args)
 
-    # Find config file
+    # --- Interactive startup ---
+
+    # Pick project directory
+    if parsed.dir:
+        target_dir = parsed.dir.resolve()
+    else:
+        target_dir = pick_project()
+
+    # Get the task
+    if parsed.task:
+        task = parsed.task
+    else:
+        task = get_task()
+
+    # --- Config ---
     config_path = parsed.config
     if not config_path:
-        # Look for config.yaml in project dir, then claudex install dir
         candidates = [
-            parsed.dir / "config.yaml",
-            Path(__file__).parent.parent / "config.yaml",
+            target_dir / "config.yaml",
+            CLAUDEX_HOME / "config.yaml",
         ]
         for candidate in candidates:
             if candidate.exists():
@@ -175,14 +255,13 @@ def main(args=None):
 
     config = load_config(config_path)
 
-    # Apply CLI overrides
     if parsed.max_rounds:
         config.planning_max_rounds = parsed.max_rounds
     if parsed.max_iterations:
         config.resolve_max_iterations = parsed.max_iterations
 
     # Find roles directory
-    roles_dir = Path(__file__).parent.parent / "roles"
+    roles_dir = CLAUDEX_HOME / "roles"
     if not roles_dir.exists():
         console.print("[red]ERROR: roles/ directory not found.[/red]")
         sys.exit(1)
@@ -190,16 +269,17 @@ def main(args=None):
     # Banner
     console.print()
     console.print(Rule("[bold magenta]Claudex[/bold magenta]", style="magenta"))
-    console.print(f"  Task: [bold]{parsed.task}[/bold]")
-    console.print(f"  Target: {parsed.dir.resolve()}")
+    console.print(f"  Task: [bold]{task}[/bold]")
+    console.print(f"  Project: [bold]{target_dir}[/bold]")
     console.print()
 
     # Run the pipeline
-    message_handler = on_message if parsed.verbose else _quiet_handler
+    verbose = parsed.verbose and not parsed.quiet
+    message_handler = on_message if verbose else _quiet_handler
     orchestrator = Orchestrator(config, roles_dir, on_message=message_handler)
 
     try:
-        state = orchestrator.run(parsed.task, parsed.dir.resolve())
+        state = orchestrator.run(task, target_dir)
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user.[/yellow]")
         sys.exit(1)
