@@ -46,10 +46,13 @@ Review for:
 Be thorough but fair. If the code is solid, say so.
 If there are issues, be specific about what's wrong and how to fix it.
 
-IMPORTANT: End your review with a verdict on its own line, exactly like this:
-VERDICT: APPROVED
-or
-VERDICT: REJECTED
+IMPORTANT: After your prose review, END with a SINGLE fenced JSON verdict block,
+exactly in this shape and as the last thing in your response:
+```json
+{{"approved": true, "issues": [{{"severity": "critical|high|medium|low", "file": "path/to/file", "issue": "what is wrong", "fix": "how to fix it"}}], "assessment": "one-paragraph summary"}}
+```
+Rules: set "approved": false if there is ANY critical or high severity issue.
+Use [] for "issues" when there are none.
 """
 
     system_prompt = f"""You are a Technical Architect conducting a blind code review.
@@ -71,88 +74,108 @@ Expert domains: {', '.join(state.analysis.required_expertise)}"""
     if on_message:
         on_message("claude", "Architect (Audit)", response.content)
 
-    approved = _detect_approval(response.content)
-    issues = _extract_issues(response.content)
+    approved, issues, assessment, parsed_ok = _parse_verdict(response.content)
 
-    feedback = ""
-    if not approved:
-        feedback = response.content
+    if on_message and not parsed_ok:
+        on_message(
+            "system", "Claudex",
+            "Audit verdict JSON missing/malformed — failing closed (treated as REJECTED).",
+        )
+
+    feedback = "" if approved else response.content
 
     return AuditResult(
         approved=approved,
-        assessment=response.content,
+        assessment=assessment,
         issues=issues,
         feedback_for_coder=feedback,
     )
 
 
-def _detect_approval(text: str) -> bool:
-    """Determine if the audit approved or rejected the code.
+_VALID_SEVERITIES = frozenset({"critical", "high", "medium", "low"})
 
-    Uses last-match strategy: find the last occurrence of
-    VERDICT: APPROVED or VERDICT: REJECTED. Falls back to
-    scanning for standalone APPROVED/REJECTED lines.
+
+def _parse_verdict(text: str, allow_legacy_verdict: bool = False) -> tuple[bool, list[AuditIssue], str, bool]:
+    """Parse the structured JSON verdict. Fail closed.
+
+    Returns (approved, issues, assessment, parsed_ok).
+      - Primary: a fenced or raw JSON object containing an "approved" key.
+      - Structural guard: any critical/high issue forces approved=False,
+        even if the model set approved=true (anti-sycophancy).
+      - Missing/malformed JSON: REJECT. The legacy `VERDICT: APPROVED` line is
+        honored ONLY when allow_legacy_verdict=True (e.g. re-parsing old saved
+        transcripts) — never for active audits, so a model cannot skip the
+        required JSON contract and still pass via legacy text.
     """
-    # Strategy 1: Look for explicit VERDICT: line (last match wins)
-    verdict_matches = list(re.finditer(
-        r'VERDICT:\s*(APPROVED|REJECTED)',
-        text,
-        re.IGNORECASE,
-    ))
-    if verdict_matches:
-        last = verdict_matches[-1]
-        return last.group(1).upper() == "APPROVED"
+    verdict = _extract_verdict_json(text)
+    if verdict is not None:
+        approved = bool(verdict.get("approved", False))
+        issues = _issues_from_json(verdict.get("issues", []))
+        assessment = str(verdict.get("assessment", "")).strip() or text.strip()
+        if any(i.severity in ("critical", "high") for i in issues):
+            approved = False
+        return approved, issues, assessment, True
 
-    # Strategy 2: Scan lines from the bottom for standalone verdict words
-    lines = text.strip().split("\n")
-    for line in reversed(lines):
-        stripped = line.strip().strip("*#- ")
-        if stripped.upper() in ("APPROVED", "REJECTED"):
-            return stripped.upper() == "APPROVED"
-        if stripped.upper().startswith("VERDICT"):
-            return "APPROVED" in stripped.upper()
-
-    # Strategy 3: Last resort — count occurrences, but only in
-    # verdict-like contexts (not in prose about "rejected alternatives")
-    approve_count = len(re.findall(r'\bapproved\b', text, re.IGNORECASE))
-    reject_count = len(re.findall(r'\brejected\b', text, re.IGNORECASE))
-
-    # Only trust this if one clearly dominates
-    if approve_count > 0 and reject_count == 0:
-        return True
-    if reject_count > 0 and approve_count == 0:
-        return False
-
-    # Default to not approved if ambiguous
-    return False
+    if allow_legacy_verdict:
+        return _detect_verdict_line(text), [], text.strip(), False
+    return False, [], text.strip(), False
 
 
-def _extract_issues(text: str) -> list[AuditIssue]:
-    """Extract specific issues from the audit review."""
-    issues = []
+def _extract_verdict_json(text: str) -> dict | None:
+    """Return the last JSON object containing an "approved" key, or None.
 
-    issue_patterns = [
-        r'(?:issue|problem|bug|vulnerability|concern)\s*(?:\d+)?[:.]\s*(.+)',
-        r'[-*]\s*(?:CRITICAL|HIGH|MEDIUM|LOW)[:.]\s*(.+)',
-    ]
+    Prefers fenced ```json blocks; falls back to raw brace scanning. Malformed
+    JSON is skipped (contributes nothing), so a broken block fails closed.
+    """
+    candidates: list[dict] = []
 
-    for pattern in issue_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
+    for match in re.finditer(r"```json\s*\n?(.*?)\n?\s*```", text, re.DOTALL):
+        try:
+            data = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and "approved" in data:
+            candidates.append(data)
+
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            data, _ = decoder.raw_decode(text, match.start())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict) and "approved" in data:
+            candidates.append(data)
+
+    return candidates[-1] if candidates else None
+
+
+def _issues_from_json(raw) -> list[AuditIssue]:
+    """Build AuditIssue list from the verdict's structured issues array."""
+    issues: list[AuditIssue] = []
+    if not isinstance(raw, list):
+        return issues
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        issue_text = str(item.get("issue", "")).strip()
+        if not issue_text:
+            continue
+        severity = str(item.get("severity", "medium")).strip().lower()
+        if severity not in _VALID_SEVERITIES:
             severity = "medium"
-            match_lower = match.lower()
-            if any(kw in match_lower for kw in ["critical", "security", "vulnerability", "injection"]):
-                severity = "critical"
-            elif any(kw in match_lower for kw in ["high", "bug", "incorrect", "wrong"]):
-                severity = "high"
-            elif any(kw in match_lower for kw in ["low", "style", "naming", "minor"]):
-                severity = "low"
-
-            issues.append(AuditIssue(
-                severity=severity,
-                file="",
-                issue=match.strip(),
-                suggested_fix="",
-            ))
-
+        fix = str(item.get("fix", "") or item.get("suggested_fix", "")).strip()
+        issues.append(AuditIssue(
+            severity=severity,
+            file=str(item.get("file", "")).strip(),
+            issue=issue_text,
+            suggested_fix=fix,
+        ))
     return issues
+
+
+def _detect_verdict_line(text: str) -> bool:
+    """Fail-closed fallback: True only on an explicit `VERDICT: APPROVED` line."""
+    matches = list(re.finditer(r'VERDICT:\s*(APPROVED|REJECTED)', text, re.IGNORECASE))
+    if matches:
+        return matches[-1].group(1).upper() == "APPROVED"
+    return False
