@@ -36,6 +36,12 @@ class Orchestrator:
         while state.current_node not in (NodeType.DONE, NodeType.FAILED):
             state = self._step(state)
 
+        # Record the session quota ledger (Wave 1.4) before saving/learning.
+        state.usage_summary = {
+            "claude": {"calls": self.claude.call_count, **self.claude.usage_totals},
+            "codex": {"calls": self.codex.call_count, **self.codex.usage_totals},
+        }
+
         # Save session and learn from it
         try:
             session_path = save_session(state)

@@ -39,7 +39,7 @@ class ClaudeProvider(LLMProvider):
             return cmd_path or "claude"
         return "claude"
 
-    def send(self, prompt: str, system_prompt: str = "") -> LLMResponse:
+    def _send(self, prompt: str, system_prompt: str = "") -> LLMResponse:
         """Send a prompt via claude -p and capture the response.
 
         Writes the prompt to a temp file and pipes it via stdin to avoid both

@@ -172,7 +172,40 @@ def display_decision_brief(state):
     rounds = len(state.plan.rounds) if state.plan else 0
     iterations = state.resolve_iteration
     console.print(f"  Planning rounds: {rounds} | Fix iterations: {iterations}")
+
+    _display_quota(state)
     console.print()
+
+
+def _display_quota(state):
+    """Show the per-provider quota ledger (subscription usage, never dollars)."""
+    us = getattr(state, "usage_summary", None)
+    if not us:
+        return
+
+    def toks(d):
+        return int(d.get("input_tokens", 0)) + int(d.get("output_tokens", 0))
+
+    c = us.get("claude", {})
+    x = us.get("codex", {})
+    c_tok, x_tok = toks(c), toks(x)
+    total = c_tok + x_tok
+    if total == 0 and not (c.get("calls") or x.get("calls")):
+        return
+
+    codex_share = (x_tok / total * 100) if total else 0
+    lines = [
+        f"  [cyan]Claude[/cyan]: {c.get('calls', 0)} calls · {c_tok:,} tok "
+        f"(cache-read {int(c.get('cached_input_tokens', 0)):,})",
+        f"  [green]Codex[/green] : {x.get('calls', 0)} calls · {x_tok:,} tok "
+        f"(cache-read {int(x.get('cached_input_tokens', 0)):,})",
+        f"  [dim]Codex carried {codex_share:.0f}% of token volume[/dim]",
+    ]
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold]Quota ledger[/bold] [dim](subscription usage, not $)[/dim]",
+        border_style="magenta",
+    ))
 
 
 def prompt_approval() -> bool:

@@ -21,15 +21,30 @@ class LLMResponse:
 class LLMProvider(ABC):
     """Abstract base for CLI-based LLM providers."""
 
+    def __init__(self) -> None:
+        # Session quota ledger (Wave 1.4): every send() is tallied here so the
+        # decision brief can show who carried the load. Quota/efficiency, not $.
+        self.call_count = 0
+        self.usage_totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+
     @property
     @abstractmethod
     def name(self) -> str:
         """Provider name (e.g., 'claude', 'codex')."""
         ...
 
+    def send(self, prompt: str, system_prompt: str = "", **kwargs) -> LLMResponse:
+        """Send a prompt and return the response, recording usage for the ledger."""
+        resp = self._send(prompt, system_prompt, **kwargs)
+        self.call_count += 1
+        self.usage_totals["input_tokens"] += getattr(resp, "input_tokens", 0) or 0
+        self.usage_totals["cached_input_tokens"] += getattr(resp, "cached_input_tokens", 0) or 0
+        self.usage_totals["output_tokens"] += getattr(resp, "output_tokens", 0) or 0
+        return resp
+
     @abstractmethod
-    def send(self, prompt: str, system_prompt: str = "") -> LLMResponse:
-        """Send a prompt and return the response."""
+    def _send(self, prompt: str, system_prompt: str = "") -> LLMResponse:
+        """Provider-specific send implementation (wrapped by send())."""
         ...
 
     def is_available(self) -> bool:

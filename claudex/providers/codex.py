@@ -29,7 +29,7 @@ class CodexProvider(LLMProvider):
             return cmd_path or "codex"
         return "codex"
 
-    def send(self, prompt: str, system_prompt: str = "", cwd: str = "") -> LLMResponse:
+    def _send(self, prompt: str, system_prompt: str = "", cwd: str = "") -> LLMResponse:
         """Send a prompt via codex exec and capture the response.
 
         Writes prompt to a temp file and pipes it via stdin to avoid both

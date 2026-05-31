@@ -130,6 +130,10 @@ class SessionState:
 
     resolve_iteration: int = 0
 
+    # Per-provider quota ledger (Wave 1.4): {"claude": {calls, input_tokens,
+    # cached_input_tokens, output_tokens}, "codex": {...}}. Quota gauge, not $.
+    usage_summary: dict = field(default_factory=dict)
+
     transcript: list[DebateMessage] = field(default_factory=list)
 
     def add_message(self, agent: str, role: str, content: str) -> None:

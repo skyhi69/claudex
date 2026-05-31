@@ -163,6 +163,7 @@ def save_session(state: SessionState) -> Path:
             ],
         },
         "resolve_iterations": state.resolve_iteration,
+        "usage": state.usage_summary,
     }
 
     filename = f"{state.session_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
