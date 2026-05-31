@@ -128,6 +128,16 @@ class SessionState:
     audit_results: list[AuditResult] = field(default_factory=list)
     decision_brief: Optional[DecisionBrief] = None
 
+    # Wave 2A grounded-build state — the worktree, its tested diff, and evidence.
+    stage_dir: Optional[Path] = None
+    diff: str = ""
+    name_status: str = ""
+    build_explanation: str = ""
+    verification_passed: bool = False
+    verification_is_smoke: bool = False
+    verification_label: str = ""
+    verification_output: str = ""
+
     resolve_iteration: int = 0
 
     # Per-provider quota ledger (Wave 1.4): {"claude": {calls, input_tokens,

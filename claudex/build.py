@@ -102,6 +102,24 @@ def _extract_explanation(text: str) -> str:
     return cleaned[:500]
 
 
+def record_build(state, build_result: "BuildResult") -> None:
+    """Copy a BuildResult + the worktree diff onto the session state.
+
+    Kept here (not in run_build) so run_build stays git-free and unit-testable;
+    this is the bridge the orchestrator/resolve use after a build.
+    """
+    from . import worktree
+    state.build_explanation = build_result.explanation
+    v = build_result.verification
+    state.verification_passed = bool(v and v.passed)
+    state.verification_is_smoke = bool(v and v.is_smoke)
+    state.verification_label = v.label() if v else "no verification"
+    state.verification_output = v.output if v else ""
+    if state.stage_dir:
+        state.diff = worktree.stage_diff(state.stage_dir)
+        state.name_status = worktree.stage_name_status(state.stage_dir)
+
+
 def run_build(
     stage,
     plan: str,

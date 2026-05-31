@@ -21,6 +21,9 @@ class ClaudexConfig:
     stall_threshold: int = 2
     backup_files: bool = True
     require_approval: bool = True
+    # Wave 2A grounded build
+    test_command: str = ""          # explicit verification command (overrides detection)
+    auto_git_init: bool = True      # init git in greenfield targets so the worktree flow works
 
 
 def load_config(config_path: Path | None = None) -> ClaudexConfig:
@@ -33,7 +36,7 @@ def load_config(config_path: Path | None = None) -> ClaudexConfig:
 
         caps = data.get("safety_caps", {})
         output = data.get("output", {})
-        resolve = data.get("phases", {}).get("resolve", {})
+        build = data.get("build", {})
 
         return ClaudexConfig(
             planning_max_rounds=caps.get("max_planning_rounds", defaults.planning_max_rounds),
@@ -41,6 +44,8 @@ def load_config(config_path: Path | None = None) -> ClaudexConfig:
             stall_threshold=caps.get("stall_threshold", defaults.stall_threshold),
             backup_files=output.get("backup_files", defaults.backup_files),
             require_approval=output.get("require_approval", defaults.require_approval),
+            test_command=build.get("test_command", defaults.test_command),
+            auto_git_init=build.get("auto_git_init", defaults.auto_git_init),
         )
 
     return defaults

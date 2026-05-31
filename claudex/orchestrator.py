@@ -5,13 +5,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from . import worktree
+from .build import run_build, record_build
 from .config import ClaudexConfig
-from .file_writer import write_files, UnsafePathError
 from .memory import save_session, auto_learn
 from .models import DecisionBrief, NodeType, SessionState
 from .phases.analyze import run_analysis
 from .phases.audit import run_audit
-from .phases.code import run_coding
 from .phases.plan import run_planning
 from .phases.resolve import run_resolution
 from .providers.claude import ClaudeProvider
@@ -123,17 +123,40 @@ class Orchestrator:
         return state
 
     def _handle_code(self, state: SessionState) -> SessionState:
-        """Phase 3: Code generation."""
-        self.on_message("system", "Claudex", "Phase 3: Codex generating code...")
+        """Phase 3: Codex builds in an isolated git worktree; claudex applies + verifies."""
+        self.on_message("system", "Claudex", "Phase 3: Codex building in an isolated worktree...")
+        target = state.target_dir
 
-        state.code_result = run_coding(state, self.codex, self.on_message)
-
-        if not state.code_result.files:
-            self.on_message("system", "Claudex", "ERROR: No files generated.")
+        try:
+            worktree.ensure_repo(target, auto_git_init=self.config.auto_git_init, on_message=self.on_message)
+        except worktree.GitError as e:
+            self.on_message("system", "Claudex", f"ERROR: cannot prepare git worktree: {e}")
             state.current_node = NodeType.FAILED
             return state
 
-        self.on_message("system", "Claudex", f"Generated {len(state.code_result.files)} file(s)")
+        state.stage_dir = worktree.create_worktree(target, state.session_id)
+
+        build = run_build(
+            state.stage_dir,
+            state.plan.agreed_plan if state.plan else "",
+            state.analysis.project_context if state.analysis else "",
+            self.codex,
+            configured_test=self.config.test_command,
+            on_message=self.on_message,
+        )
+        record_build(state, build)
+
+        if not build.edits_applied:
+            self.on_message("system", "Claudex", f"ERROR: build failed: {build.error}")
+            state.current_node = NodeType.FAILED
+            return state
+
+        if not state.diff.strip():
+            self.on_message("system", "Claudex", "ERROR: Codex produced no changes.")
+            state.current_node = NodeType.FAILED
+            return state
+
+        self.on_message("system", "Claudex", f"Build applied. Verification: {state.verification_label}")
         state.current_node = NodeType.AUDIT
         return state
 
@@ -165,6 +188,7 @@ class Orchestrator:
             self.codex,
             max_iterations=self.config.resolve_max_iterations,
             on_message=self.on_message,
+            config=self.config,
         )
 
         state.decision_brief = self._build_brief(state)
@@ -180,37 +204,46 @@ class Orchestrator:
     def _build_brief(self, state: SessionState) -> DecisionBrief:
         """Build the decision brief for the user."""
         files_summary = []
-        for f in (state.code_result.files if state.code_result else []):
-            files_summary.append({
-                "path": f.path,
-                "action": f.action,
-                "lines": f.content.count("\n") + 1,
-            })
+        for line in (state.name_status or "").splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                status, path = parts
+                action = {"A": "create", "M": "modify", "D": "delete"}.get(status[0], status)
+                files_summary.append({"path": path.strip(), "action": action, "lines": 0})
 
         last_audit = state.audit_results[-1] if state.audit_results else None
         unresolved = [i.issue for i in last_audit.issues] if last_audit and not last_audit.approved else []
 
         return DecisionBrief(
-            what_was_built=state.code_result.explanation if state.code_result else "",
+            what_was_built=state.build_explanation or (state.analysis.task_summary if state.analysis else ""),
             why_this_approach=state.plan.agreed_plan[:500] if state.plan else "",
             alternatives_rejected=state.plan.alternatives_rejected if state.plan else [],
             unresolved_concerns=unresolved,
             files_summary=files_summary,
         )
 
-    def write_approved_files(self, state: SessionState) -> list:
-        """Write the approved files to disk."""
-        if not state.code_result or not state.code_result.files:
-            return ["No files to write."]
-
+    def apply_on_approval(self, state: SessionState) -> list:
+        """Apply the tested diff to the real project (D1 git-native); keep a backup branch."""
+        if not state.stage_dir or not state.diff.strip():
+            return ["No changes to apply."]
+        summaries = []
         try:
-            return write_files(
-                state.code_result.files,
-                state.target_dir,
-                backup=self.config.backup_files,
-            )
-        except UnsafePathError as e:
-            # Path confinement (Wave 1.1): refuse the whole batch, fail loudly,
-            # never write a partial set outside the target directory.
-            self.on_message("system", "Claudex", f"ERROR: unsafe path — no files written. {e}")
-            return [f"REJECTED — no files written (unsafe path detected). {e}"]
+            if worktree.commit_stage(state.stage_dir):
+                summaries.append(f"  Backup branch: claudex/{worktree._sanitize_ref(state.session_id)}")
+            ok = worktree.apply_patch(state.target_dir, state.diff, require_clean=True)
+        except worktree.GitError as e:
+            return [f"  Could not apply changes: {e}"]
+        if ok:
+            summaries.append("  Applied the tested diff to your working tree "
+                             "(review with `git status` / `git diff`).")
+        else:
+            summaries.append("  ERROR: patch did not apply cleanly; the backup branch holds the changes.")
+        return summaries
+
+    def cleanup(self, state: SessionState) -> None:
+        """Remove the throwaway worktree (the backup branch persists). Safe to call once."""
+        if state.stage_dir:
+            try:
+                worktree.remove_worktree(state.target_dir, state.stage_dir)
+            finally:
+                state.stage_dir = None

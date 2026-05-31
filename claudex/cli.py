@@ -142,10 +142,10 @@ def display_decision_brief(state):
         file_lines = []
         for f in brief.files_summary:
             symbol = "+" if f["action"] == "create" else "~" if f["action"] == "modify" else "-"
-            file_lines.append(f"  {symbol} {f['path']} ({f['lines']} lines, {f['action']})")
+            file_lines.append(f"  {symbol} {f['path']} ({f['action']})")
         console.print(Panel(
             "\n".join(file_lines),
-            title="[bold]Files[/bold]",
+            title="[bold]Files changed[/bold]",
             border_style="green",
         ))
 
@@ -163,11 +163,15 @@ def display_decision_brief(state):
             border_style="yellow",
         ))
 
+    if state.verification_label:
+        v_style = "green" if state.verification_passed else "red"
+        console.print(f"\n  Verification: [{v_style}]{state.verification_label}[/{v_style}]")
+
     if state.audit_results:
         last_audit = state.audit_results[-1]
         status = "[bold green]APPROVED[/bold green]" if last_audit.approved else "[bold red]NOT FULLY APPROVED[/bold red]"
         total_audits = len(state.audit_results)
-        console.print(f"\n  Audit status: {status} (after {total_audits} review(s))")
+        console.print(f"  Audit status: {status} (after {total_audits} review(s))")
 
     rounds = len(state.plan.rounds) if state.plan else 0
     iterations = state.resolve_iteration
@@ -209,9 +213,16 @@ def _display_quota(state):
 
 
 def prompt_approval() -> bool:
-    """Ask the user whether to write files to disk."""
+    """Ask the user whether to apply the tested changes to their project."""
     console.print(Rule(style="dim"))
-    return Confirm.ask("[bold]Write these files to disk?[/bold]", default=True)
+    return Confirm.ask("[bold]Apply these tested changes to your project?[/bold]", default=True)
+
+
+def _maybe_show_diff(state):
+    """Offer to show the full tested diff before approval."""
+    if state.diff and state.diff.strip():
+        if Confirm.ask("[bold]Show the full diff first?[/bold]", default=False):
+            console.print(state.diff)
 
 
 def main(args=None):
@@ -329,25 +340,24 @@ def main(args=None):
     # Display decision brief
     display_decision_brief(state)
 
-    # Write files (unless dry-run)
-    if parsed.dry_run:
-        console.print("[dim]Dry run — no files written.[/dim]")
-    elif state.code_result and state.code_result.files:
-        if config.require_approval:
-            if prompt_approval():
-                summaries = orchestrator.write_approved_files(state)
-                console.print("[bold green]Files written:[/bold green]")
-                for s in summaries:
+    # Apply the tested diff (unless dry-run). Changes live in a throwaway worktree
+    # until approved; cleanup removes it either way (the backup branch persists).
+    try:
+        if parsed.dry_run:
+            console.print("[dim]Dry run — tested changes were NOT applied to your project.[/dim]")
+        elif state.diff and state.diff.strip():
+            _maybe_show_diff(state)
+            apply_it = (not config.require_approval) or prompt_approval()
+            if apply_it:
+                console.print("[bold green]Applying:[/bold green]")
+                for s in orchestrator.apply_on_approval(state):
                     console.print(s)
             else:
-                console.print("[dim]No files written.[/dim]")
+                console.print("[dim]Discarded — nothing applied to your project.[/dim]")
         else:
-            summaries = orchestrator.write_approved_files(state)
-            console.print("[bold green]Files written:[/bold green]")
-            for s in summaries:
-                console.print(s)
-    else:
-        console.print("[dim]No files to write.[/dim]")
+            console.print("[dim]No changes to apply.[/dim]")
+    finally:
+        orchestrator.cleanup(state)
 
     console.print()
     console.print(f"[dim]Session {state.session_id} complete.[/dim]")

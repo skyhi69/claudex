@@ -1,11 +1,9 @@
-"""Phase 5: Resolution — discuss fixes, implement, re-audit until approved."""
+"""Phase 5: Resolution — Codex fixes in the worktree, claudex re-verifies, Claude re-audits."""
 
-from pathlib import Path
-
-from ..models import SessionState, AuditResult
-from ..providers.base import LLMProvider
-from ..phases.code import run_coding
+from ..build import run_build, record_build
+from ..models import SessionState
 from ..phases.audit import run_audit
+from ..providers.base import LLMProvider
 
 
 def run_resolution(
@@ -14,18 +12,16 @@ def run_resolution(
     codex: LLMProvider,
     max_iterations: int = 5,
     on_message=None,
+    config=None,
 ) -> bool:
-    """Iterate fix → re-audit until approved or max iterations reached.
+    """Iterate fix -> re-verify -> re-audit until approved or max iterations.
 
-    Returns True if code was ultimately approved.
-
-    The loop:
-    1. Claude shares audit feedback with Codex
-    2. Both briefly discuss the fix approach (1-2 messages)
-    3. Codex implements the fix
-    4. Claude re-audits
-    5. Repeat if still rejected
+    Codex fixes IN THE SAME worktree (grounded in the current code + the reviewer's
+    feedback + the captured verification output); claudex re-runs the tests and
+    Claude re-audits the new diff. Returns True if ultimately approved.
     """
+    configured_test = config.test_command if config else ""
+
     for iteration in range(1, max_iterations + 1):
         state.resolve_iteration = iteration
         last_audit = state.audit_results[-1]
@@ -33,26 +29,29 @@ def run_resolution(
         if on_message:
             on_message("system", "Claudex", f"Resolution iteration {iteration}/{max_iterations}")
 
-        # Step 1: Brief discussion about fixes
-        fix_discussion = _discuss_fixes(state, claude, codex, last_audit, on_message)
+        feedback = last_audit.feedback_for_coder or "\n".join(i.issue for i in last_audit.issues)
 
-        # Step 2: Codex implements fixes
         if on_message:
-            on_message("system", "Claudex", "Codex implementing fixes...")
+            on_message("system", "Claudex", "Codex applying fixes in the worktree...")
 
-        state.code_result = run_coding(
-            state, codex, on_message,
-            feedback=last_audit.feedback_for_coder + "\n\nDISCUSSION:\n" + fix_discussion,
+        build = run_build(
+            state.stage_dir,
+            state.plan.agreed_plan if state.plan else "",
+            state.analysis.project_context if state.analysis else "",
+            codex,
+            configured_test=configured_test,
+            feedback=feedback,
+            on_message=on_message,
         )
+        record_build(state, build)
 
-        if not state.code_result.files:
+        if not build.edits_applied:
             if on_message:
-                on_message("system", "Claudex", "Code generation failed during fix iteration.")
+                on_message("system", "Claudex", f"Fix attempt failed to apply: {build.error}")
             continue
 
-        # Step 3: Claude re-audits
         if on_message:
-            on_message("system", "Claudex", "Claude re-auditing...")
+            on_message("system", "Claudex", "Claude re-auditing the updated diff...")
 
         audit_result = run_audit(state, claude, on_message)
         state.audit_results.append(audit_result)
@@ -64,54 +63,5 @@ def run_resolution(
 
     if on_message:
         on_message("system", "Claudex",
-                    f"Max iterations ({max_iterations}) reached. Presenting current state for your review.")
+                   f"Max iterations ({max_iterations}) reached. Presenting current state for your review.")
     return False
-
-
-def _discuss_fixes(
-    state: SessionState,
-    claude: LLMProvider,
-    codex: LLMProvider,
-    last_audit: AuditResult,
-    on_message=None,
-) -> str:
-    """Brief discussion between Claude and Codex about how to fix audit issues."""
-
-    # Claude summarizes what needs fixing
-    claude_prompt = f"""Your audit found these issues with the code:
-
-{last_audit.assessment}
-
-Provide a concise summary of what needs to change, prioritized by severity.
-Focus on the specific fixes needed, not general commentary."""
-
-    claude_response = claude.send(
-        claude_prompt,
-        system_prompt="You are a Technical Architect giving fix guidance to your developer partner. Be specific and actionable.",
-    )
-
-    if not claude_response.success:
-        return last_audit.feedback_for_coder
-
-    if on_message:
-        on_message("claude", "Architect", claude_response.content)
-
-    # Codex confirms understanding / pushes back
-    codex_prompt = f"""The Technical Architect reviewed your code and found issues:
-
-{claude_response.content}
-
-Confirm you understand the fixes needed. If any fix suggestion is impractical or wrong,
-explain why and propose an alternative. Be brief and specific."""
-
-    codex_response = codex.send(
-        codex_prompt,
-        system_prompt="You are a Senior Developer receiving fix guidance. Confirm understanding or push back if the fix is wrong.",
-    )
-
-    if codex_response.success:
-        if on_message:
-            on_message("codex", "Developer", codex_response.content)
-        return f"ARCHITECT: {claude_response.content}\n\nDEVELOPER: {codex_response.content}"
-
-    return claude_response.content

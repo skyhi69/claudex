@@ -145,10 +145,12 @@ def save_session(state: SessionState) -> Path:
             "agreed_plan": state.plan.agreed_plan[:2000] if state.plan else "",
         },
         "code": {
-            "files_generated": [
-                {"path": f.path, "action": f.action, "lines": f.content.count("\n") + 1}
-                for f in (state.code_result.files if state.code_result else [])
-            ],
+            "files_changed": state.name_status,
+            "diff_lines": (state.diff.count("\n") + 1) if state.diff else 0,
+        },
+        "verification": {
+            "passed": state.verification_passed,
+            "label": state.verification_label,
         },
         "audit": {
             "total_reviews": len(state.audit_results),
