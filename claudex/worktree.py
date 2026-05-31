@@ -131,7 +131,7 @@ def commit_stage(stage, message: str = "claudex: proposed changes") -> bool:
     proposed changes — otherwise --force removal discards them and the branch
     stays at HEAD.
     """
-    _git(["add", "-A"], cwd=stage)
+    _stage_all(stage)
     staged = _git(["diff", "--cached", "--name-only"], cwd=stage, check=False).stdout.strip()
     if not staged:
         return False
@@ -139,9 +139,24 @@ def commit_stage(stage, message: str = "claudex: proposed changes") -> bool:
     return True
 
 
+# Build artifacts that verification (pytest/py_compile) or tooling create in the
+# worktree — must never enter the tested diff that gets applied to the project.
+_DIFF_EXCLUDES = [
+    ":(exclude,glob)**/__pycache__/**",
+    ":(exclude,glob)**/*.pyc",
+    ":(exclude,glob)**/.pytest_cache/**",
+    ":(exclude,glob)**/.mypy_cache/**",
+    ":(exclude,glob).serena/**",
+]
+
+
+def _stage_all(stage) -> None:
+    _git(["add", "-A", "--", ".", *_DIFF_EXCLUDES], cwd=stage)
+
+
 def stage_diff(stage) -> str:
-    """Stage all changes in the worktree and return the binary-safe patch."""
-    _git(["add", "-A"], cwd=stage)
+    """Stage all changes (excluding build artifacts) and return the binary-safe patch."""
+    _stage_all(stage)
     return _git(["diff", "--cached", "--binary"], cwd=stage).stdout
 
 

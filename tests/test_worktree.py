@@ -91,6 +91,22 @@ class TestWorktree(unittest.TestCase):
         self.assertEqual(worktree._git(["rev-parse", "--verify", branch], cwd=self.target,
                                        check=False).returncode, 0)
 
+    def test_stage_diff_excludes_build_artifacts(self):
+        worktree.ensure_repo(self.target)
+        stage = worktree.create_worktree(self.target, "sess_junk")
+        (stage / "real.py").write_text("x = 1\n", encoding="utf-8")
+        (stage / "__pycache__").mkdir()
+        (stage / "__pycache__" / "real.cpython-313.pyc").write_bytes(b"\x00junk")
+        (stage / ".serena").mkdir()
+        (stage / ".serena" / "cache.txt").write_text("junk", encoding="utf-8")
+        diff = worktree.stage_diff(stage)
+        names = worktree.stage_name_status(stage)
+        worktree.remove_worktree(self.target, stage)
+        self.assertIn("real.py", diff)
+        self.assertNotIn("__pycache__", diff)
+        self.assertNotIn(".serena", diff)
+        self.assertNotIn("__pycache__", names)
+
     def test_apply_empty_patch_is_noop_success(self):
         worktree.ensure_repo(self.target)
         self.assertTrue(worktree.apply_patch(self.target, "   "))
