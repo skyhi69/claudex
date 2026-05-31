@@ -167,6 +167,8 @@ If consensus is reached, say so clearly and include a concrete final_plan.
         if not claude_response.success:
             if on_message:
                 on_message("claude", analysis.claude_role, f"[ERROR] {claude_response.error}")
+                on_message("system", "Claudex",
+                           f"Planning halted at round {round_num}: architect call failed — {claude_response.error}")
             break
 
         claude_msg = DebateMessage(agent="claude", role=analysis.claude_role, content=claude_response.content)
@@ -201,6 +203,8 @@ If you agree, don't keep listing concerns just to seem thorough.
         if not codex_response.success:
             if on_message:
                 on_message("codex", analysis.codex_role, f"[ERROR] {codex_response.error}")
+                on_message("system", "Claudex",
+                           f"Planning halted at round {round_num}: developer call failed — {codex_response.error}")
             break
 
         codex_msg = DebateMessage(agent="codex", role=analysis.codex_role, content=codex_response.content)

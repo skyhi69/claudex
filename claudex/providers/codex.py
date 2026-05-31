@@ -59,8 +59,11 @@ class CodexProvider(LLMProvider):
                 c.extend(["--sandbox", sandbox])
             if work_dir:
                 c.extend(["-C", work_dir])
-            else:
-                c.append("--skip-git-repo-check")
+            # ALWAYS skip the git-repo trust check: a no-op inside a real repo, but
+            # required when work_dir is a not-yet-initialized greenfield target —
+            # e.g. during planning (before phase-3 git init). Without it codex exits
+            # "Not inside a trusted directory", which broke planning ("0 rounds").
+            c.append("--skip-git-repo-check")
             c.append("-")  # read prompt from stdin
             return c
 

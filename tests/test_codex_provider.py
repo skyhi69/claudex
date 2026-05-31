@@ -113,6 +113,16 @@ class TestCodexSend(unittest.TestCase):
         self.assertFalse(resp.success)
         self.assertEqual(run.call_count, _MAX_ATTEMPTS)
 
+    @mock.patch("claudex.providers.codex.subprocess.run")
+    def test_skip_git_repo_check_always_present_even_with_cwd(self, run):
+        # Regression: greenfield planning ran codex with -C <non-git target> and no
+        # skip flag -> "Not inside a trusted directory" -> planning "0 rounds".
+        run.return_value = _result(0, _JSONL_OK, "")
+        CodexProvider().send("x", cwd="C:/some/dir")
+        cmd = run.call_args[0][0]
+        self.assertIn("--skip-git-repo-check", cmd)
+        self.assertIn("-C", cmd)
+
 
 if __name__ == "__main__":
     unittest.main()
