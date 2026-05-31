@@ -29,7 +29,7 @@ class CodexProvider(LLMProvider):
             return cmd_path or "codex"
         return "codex"
 
-    def _send(self, prompt: str, system_prompt: str = "", cwd: str = "") -> LLMResponse:
+    def _send(self, prompt: str, system_prompt: str = "", cwd: str = "", sandbox: str = "") -> LLMResponse:
         """Send a prompt via codex exec and capture the response.
 
         Writes prompt to a temp file and pipes it via stdin to avoid both
@@ -55,6 +55,8 @@ class CodexProvider(LLMProvider):
 
         def _build_cmd(out_path: str) -> list:
             c = [codex_bin, "exec", "--json", "--ephemeral", "-o", out_path]
+            if sandbox:
+                c.extend(["--sandbox", sandbox])
             if work_dir:
                 c.extend(["-C", work_dir])
             else:
