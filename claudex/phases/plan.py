@@ -92,6 +92,32 @@ def _missing_block_reminder(agent_label: str, was_missing: bool) -> str:
     )
 
 
+def run_fast_plan(state: SessionState, claude: LLMProvider, on_message=None) -> PlanResult:
+    """Single-shot plan for SIMPLE tasks — no debate, conserving Claude quota and
+    skipping Codex planning calls entirely. Returns a PlanResult with no rounds.
+    """
+    analysis = state.analysis
+    prompt = f"""Write a concise, concrete implementation plan for this task. No debate needed.
+
+TASK: {state.task}
+
+TASK ANALYSIS:
+{analysis.task_summary if analysis else ''}
+
+PROJECT CONTEXT:
+{analysis.project_context if analysis else ''}
+
+Provide the file structure, key functions/classes, and any important decisions.
+Be specific and implementation-ready. Keep it tight."""
+
+    resp = claude.send(prompt, system_prompt="You are a Technical Architect writing a concise implementation plan.")
+    if on_message and resp.success:
+        on_message("claude", "Architect", resp.content)
+
+    plan_text = resp.content if resp.success else (analysis.task_summary if analysis else state.task)
+    return PlanResult(agreed_plan=plan_text, rounds=[], alternatives_rejected=[])
+
+
 def run_planning(
     state: SessionState,
     claude: LLMProvider,

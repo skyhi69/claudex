@@ -29,6 +29,10 @@ def _r(text, provider):
 
 
 class FakeClaude(LLMProvider):
+    def __init__(self, complexity="complex"):
+        super().__init__()
+        self._complexity = complexity   # "complex" -> debate path; "simple" -> fast plan
+
     @property
     def name(self):
         return "claude"
@@ -41,7 +45,7 @@ class FakeClaude(LLMProvider):
 
     def _send(self, prompt, system_prompt="", **kw):
         if "Analyze this coding task" in prompt:
-            return _r("This is a simple task: build a greeter module.", "claude")
+            return _r(f"Assessment of the greeter task.\nCOMPLEXITY: {self._complexity}", "claude")
         if "BLIND DIFF REVIEW" in prompt:
             return _r('Looks correct and complete.\n```json\n'
                       '{"approved": true, "issues": [], "assessment": "Correct."}\n```', "claude")
@@ -100,6 +104,18 @@ class TestPipelineEndToEnd(unittest.TestCase):
 
         orch.cleanup(state)
         self.assertIsNone(state.stage_dir)
+
+    def test_simple_task_uses_fast_plan_no_debate(self):
+        # B3: a simple task skips the debate entirely (no planning rounds) but
+        # still builds, verifies, and audits to completion.
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude(complexity="simple")
+        orch.codex = FakeCodex()
+        state = orch.run("Create a greeter with greet(name)", self.target)
+        self.assertEqual(state.current_node, NodeType.DONE)
+        self.assertEqual(state.plan.rounds, [])              # fast path: no debate
+        self.assertTrue(state.verification_passed)
+        self.assertTrue(state.audit_results[-1].approved)
 
     def test_brief_uses_changed_files_when_no_explanation(self):
         from claudex.models import SessionState

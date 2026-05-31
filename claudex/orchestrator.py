@@ -12,7 +12,7 @@ from .memory import save_session, auto_learn
 from .models import DecisionBrief, NodeType, SessionState
 from .phases.analyze import run_analysis
 from .phases.audit import run_audit
-from .phases.plan import run_planning
+from .phases.plan import run_planning, run_fast_plan
 from .phases.resolve import run_resolution
 from .providers.claude import ClaudeProvider
 from .providers.codex import CodexProvider
@@ -102,15 +102,31 @@ class Orchestrator:
         return state
 
     def _handle_plan(self, state: SessionState) -> SessionState:
-        """Phase 2: Collaborative planning."""
-        self.on_message("system", "Claudex", "Phase 2: Collaborative planning...")
+        """Phase 2: Planning, routed by complexity (B3) to conserve Claude quota.
+
+        simple   -> one-shot Claude plan, no debate (no Codex planning calls)
+        moderate -> short debate (<=3 rounds)
+        complex  -> full debate (config cap)
+        """
+        complexity = state.analysis.complexity if state.analysis else "moderate"
+
+        if complexity == "simple":
+            self.on_message("system", "Claudex", "Phase 2: Simple task — fast plan (skipping debate)...")
+            state.plan = run_fast_plan(state, self.claude, on_message=self.on_message)
+            self.on_message("system", "Claudex", "Fast plan ready.")
+            state.current_node = NodeType.CODE
+            return state
+
+        max_rounds = 3 if complexity == "moderate" else self.config.planning_max_rounds
+        self.on_message("system", "Claudex",
+                        f"Phase 2: Collaborative planning ({complexity}, up to {max_rounds} rounds)...")
 
         state.plan = run_planning(
             state,
             self.claude,
             self.codex,
             roles_dir=self.roles_dir,
-            max_rounds=self.config.planning_max_rounds,
+            max_rounds=max_rounds,
             stall_threshold=self.config.stall_threshold,
             on_message=self.on_message,
         )
