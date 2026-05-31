@@ -69,7 +69,7 @@ class CodexProvider(LLMProvider):
                     stdin=stdin_file,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    timeout=300,  # 5 min max per call
+                    timeout=900,  # 15 min — bumped from 300s for deep-audit workloads
                 )
 
             # Clean up prompt file
@@ -111,7 +111,7 @@ class CodexProvider(LLMProvider):
                 content="",
                 provider=self.name,
                 success=False,
-                error="Codex CLI timed out after 5 minutes",
+                error="Codex CLI timed out after 15 minutes",
             )
         except (FileNotFoundError, OSError) as e:
             for p in (prompt_path, output_path):
