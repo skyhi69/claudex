@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from .config import ClaudexConfig
-from .file_writer import write_files
+from .file_writer import write_files, UnsafePathError
 from .memory import save_session, auto_learn
 from .models import DecisionBrief, NodeType, SessionState
 from .phases.analyze import run_analysis
@@ -197,8 +197,14 @@ class Orchestrator:
         if not state.code_result or not state.code_result.files:
             return ["No files to write."]
 
-        return write_files(
-            state.code_result.files,
-            state.target_dir,
-            backup=self.config.backup_files,
-        )
+        try:
+            return write_files(
+                state.code_result.files,
+                state.target_dir,
+                backup=self.config.backup_files,
+            )
+        except UnsafePathError as e:
+            # Path confinement (Wave 1.1): refuse the whole batch, fail loudly,
+            # never write a partial set outside the target directory.
+            self.on_message("system", "Claudex", f"ERROR: unsafe path — no files written. {e}")
+            return [f"REJECTED — no files written (unsafe path detected). {e}"]
