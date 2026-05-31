@@ -87,6 +87,7 @@ class ClaudeProvider(LLMProvider):
                 content=self._parse_output(stdout),
                 provider=self.name,
                 success=True,
+                **self._parse_usage(stdout),
             )
 
         except subprocess.TimeoutExpired:
@@ -109,6 +110,27 @@ class ClaudeProvider(LLMProvider):
                     os.unlink(prompt_path)
                 except OSError:
                     pass
+
+    def _parse_usage(self, raw: str) -> dict:
+        """Extract token usage from claude's JSON envelope (quota gauge, not dollars).
+
+        Shape (verified live): {"usage": {"input_tokens", "cache_read_input_tokens",
+        "output_tokens", ...}}. Returns zeros if absent/unparseable. total_cost_usd
+        is deliberately ignored — claudex tracks quota/tokens, never billing.
+        """
+        zeros = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+        try:
+            data = json.loads(raw)
+            usage = data.get("usage", {}) if isinstance(data, dict) else {}
+            if not isinstance(usage, dict):
+                return zeros
+            return {
+                "input_tokens": int(usage.get("input_tokens", 0) or 0),
+                "cached_input_tokens": int(usage.get("cache_read_input_tokens", 0) or 0),
+                "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            }
+        except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            return zeros
 
     def _parse_output(self, raw: str) -> str:
         """Extract text content from claude's JSON output."""

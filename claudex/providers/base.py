@@ -11,6 +11,11 @@ class LLMResponse:
     provider: str       # "claude" or "codex"
     success: bool
     error: str = ""
+    # Usage telemetry (Wave 1.3). Subscription quota/efficiency gauge — NOT dollars.
+    # Zero when the CLI did not report usage.
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
 
 
 class LLMProvider(ABC):
