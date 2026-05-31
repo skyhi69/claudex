@@ -214,8 +214,15 @@ class Orchestrator:
         last_audit = state.audit_results[-1] if state.audit_results else None
         unresolved = [i.issue for i in last_audit.issues] if last_audit and not last_audit.approved else []
 
+        # Honest "what was built": Codex's summary, else the actual changed files —
+        # NOT the analysis essay (which describes intent, not the result).
+        what_was_built = state.build_explanation.strip()
+        if not what_was_built:
+            changed = [f["path"] for f in files_summary]
+            what_was_built = ("Changed: " + ", ".join(changed)) if changed else "(no changes recorded)"
+
         return DecisionBrief(
-            what_was_built=state.build_explanation or (state.analysis.task_summary if state.analysis else ""),
+            what_was_built=what_was_built,
             why_this_approach=state.plan.agreed_plan[:500] if state.plan else "",
             alternatives_rejected=state.plan.alternatives_rejected if state.plan else [],
             unresolved_concerns=unresolved,

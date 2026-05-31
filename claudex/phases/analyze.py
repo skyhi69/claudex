@@ -1,6 +1,7 @@
 """Phase 1: Task Analysis — Claude analyzes the task and assigns expert roles."""
 
 import os
+import re
 from pathlib import Path
 
 from ..memory import load_project_context, select_relevant_lessons, format_lessons_for_prompt, ANALYZE_LESSON_LIMIT, ANALYZE_LESSON_CHARS
@@ -28,6 +29,26 @@ def _scan_project(target_dir: Path) -> str:
         return "(empty directory — new project)"
 
     return "Existing project files:\n" + "\n".join(f"  {f}" for f in sorted(files)[:50])
+
+
+def _detect_complexity(text: str) -> str:
+    """Classify task complexity from the analysis text.
+
+    Prefers the explicit `COMPLEXITY: <value>` marker we ask for (last match wins,
+    skipping any echo of the instruction). Falls back to WORD-BOUNDARY keyword
+    search — never a bare substring, so 'complexity' can't false-match 'complex'
+    (the original bug that tagged every task complex).
+    """
+    matches = re.findall(r"COMPLEXITY:\s*(simple|moderate|complex)", text, re.IGNORECASE)
+    if matches:
+        return matches[-1].lower()
+
+    lower = text.lower()
+    if re.search(r"\bcomplex\b", lower):
+        return "complex"
+    if re.search(r"\b(simple|straightforward|trivial)\b", lower):
+        return "simple"
+    return "moderate"
 
 
 def run_analysis(state: SessionState, claude: LLMProvider) -> AnalysisResult:
@@ -72,7 +93,10 @@ Provide:
 3. Any additional expertise domains needed beyond what was detected
 4. Key decisions that will need to be made during planning
 
-Keep your response concise — this is just the initial analysis, not the full plan."""
+Keep your response concise — this is just the initial analysis, not the full plan.
+
+End with a line in EXACTLY this format (it is parsed):
+COMPLEXITY: <simple|moderate|complex>"""
 
     response = claude.send(prompt, system_prompt="You are a senior technical architect analyzing a coding task.")
 
@@ -87,14 +111,7 @@ Keep your response concise — this is just the initial analysis, not the full p
             complexity="moderate",
         )
 
-    # Determine complexity from response
-    lower = response.content.lower()
-    if "complex" in lower:
-        complexity = "complex"
-    elif "simple" in lower or "straightforward" in lower:
-        complexity = "simple"
-    else:
-        complexity = "moderate"
+    complexity = _detect_complexity(response.content)
 
     return AnalysisResult(
         task_summary=response.content,

@@ -47,7 +47,8 @@ To create a new file (or fully replace a small one):
 
 Rules: paths are relative to this directory; each SEARCH must match exactly once
 (include enough surrounding context to be unique); every block needs its closing
-marker. You may add a short prose summary before the blocks."""
+marker. BEGIN your response with ONE sentence summarizing what you changed, then
+the blocks."""
 
 
 @dataclass

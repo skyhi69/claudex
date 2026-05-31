@@ -101,6 +101,27 @@ class TestPipelineEndToEnd(unittest.TestCase):
         orch.cleanup(state)
         self.assertIsNone(state.stage_dir)
 
+    def test_brief_uses_changed_files_when_no_explanation(self):
+        from claudex.models import SessionState
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        state = SessionState(task="t", target_dir=self.target)
+        state.name_status = "A\thello.py\nM\tutil.py"
+        state.build_explanation = ""
+        brief = orch._build_brief(state)
+        self.assertIn("hello.py", brief.what_was_built)
+        self.assertIn("util.py", brief.what_was_built)
+        # Must NOT be the analysis essay (there is none here, but assert it's the file list).
+        self.assertTrue(brief.what_was_built.startswith("Changed:"))
+
+    def test_brief_prefers_codex_explanation(self):
+        from claudex.models import SessionState
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        state = SessionState(task="t", target_dir=self.target)
+        state.name_status = "A\thello.py"
+        state.build_explanation = "Added a greeter function."
+        brief = orch._build_brief(state)
+        self.assertEqual(brief.what_was_built, "Added a greeter function.")
+
     def test_failed_verification_blocks_approval(self):
         # Codex emits code with a syntax error → smoke fails → audit must REJECT
         # even though Claude's verdict says approved.
