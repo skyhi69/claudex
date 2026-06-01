@@ -33,8 +33,15 @@ class Orchestrator:
         state = SessionState(task=task, target_dir=target_dir)
         os.environ["CLAUDEX_PROJECT_DIR"] = str(target_dir)
 
-        while state.current_node not in (NodeType.DONE, NodeType.FAILED):
-            state = self._step(state)
+        try:
+            while state.current_node not in (NodeType.DONE, NodeType.FAILED):
+                state = self._step(state)
+        except BaseException:
+            # Never leak the throwaway worktree if the pipeline crashes or is
+            # aborted (KeyboardInterrupt) mid-run. On normal completion the CLI
+            # owns cleanup (after apply-on-approval).
+            self.cleanup(state)
+            raise
 
         # Record the session quota ledger (Wave 1.4) before saving/learning.
         state.usage_summary = {
@@ -149,6 +156,12 @@ class Orchestrator:
             self.on_message("system", "Claudex", f"ERROR: cannot prepare git worktree: {e}")
             state.current_node = NodeType.FAILED
             return state
+
+        if worktree.is_git_repo(target) and not worktree.is_clean(target):
+            self.on_message(
+                "system", "Claudex",
+                "WARNING: target has uncommitted changes — claudex builds against the last "
+                "commit, and the tested diff won't auto-apply until you commit or stash them.")
 
         state.stage_dir = worktree.create_worktree(target, state.session_id)
 

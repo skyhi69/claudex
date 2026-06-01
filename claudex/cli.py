@@ -336,6 +336,10 @@ def main(args=None):
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user.[/yellow]")
         sys.exit(1)
+    except Exception as e:
+        # The orchestrator has already cleaned up its worktree before re-raising.
+        console.print(f"\n[red]Claudex failed: {e}[/red]")
+        sys.exit(1)
 
     # Display decision brief
     display_decision_brief(state)

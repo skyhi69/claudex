@@ -9,8 +9,10 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import claudex
+import claudex.orchestrator as orch_mod
 from claudex import worktree
 from claudex.config import ClaudexConfig
 from claudex.orchestrator import Orchestrator
@@ -155,6 +157,81 @@ class TestPipelineEndToEnd(unittest.TestCase):
         self.assertEqual(state.current_node, NodeType.DONE)   # ends, but...
         self.assertFalse(state.verification_passed)           # smoke failed
         self.assertFalse(state.audit_results[-1].approved)    # gate blocked approval
+        orch.cleanup(state)
+
+    def test_resolve_loop_fixes_a_failing_build(self):
+        # First build fails the smoke gate -> audit rejects -> resolve re-prompts ->
+        # the fix passes -> approved. Exercises the full fix loop end to end.
+        class FlakeyCodex(FakeCodex):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = 0
+
+            def _send(self, prompt, system_prompt="", **kw):
+                if "emit ONLY these blocks" in prompt:
+                    self.build_calls += 1
+                    if self.build_calls == 1:
+                        return _r("=== FILE: mod.py ===\ndef f(:\n  pass\n=== END FILE ===", "codex")
+                    return _r("=== FILE: mod.py ===\ndef f():\n    return 1\n=== END FILE ===", "codex")
+                return _r("Agreed.\n" + _CONSENSUS, "codex")
+
+        orch = Orchestrator(ClaudexConfig(resolve_max_iterations=2), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude()
+        orch.codex = FlakeyCodex()
+        state = orch.run("create mod", self.target)
+        self.assertEqual(state.current_node, NodeType.DONE)
+        self.assertTrue(state.verification_passed)            # fixed during resolve
+        self.assertTrue(state.audit_results[-1].approved)
+        self.assertGreaterEqual(state.resolve_iteration, 1)   # resolve actually ran
+        orch.cleanup(state)
+
+    def test_crash_mid_run_cleans_up_worktree(self):
+        # If the pipeline throws after the worktree exists, it must NOT leak.
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude()
+        orch.codex = FakeCodex()
+        with mock.patch.object(orch_mod, "run_build", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                orch.run("crash please", self.target)
+        # No leaked claudex worktree registered in the repo.
+        listing = worktree._git(["worktree", "list"], cwd=self.target).stdout
+        self.assertNotIn("claudex_wt_", listing)
+
+    def test_existing_repo_edit_flow(self):
+        # Existing repo (not greenfield) + an EDIT to an existing file — the path
+        # the Wave 2B benchmark exercised. Greenfield e2e tests miss this.
+        worktree.ensure_repo(self.target)
+        (self.target / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        worktree._git(["add", "-A"], cwd=self.target)
+        worktree._git(worktree._IDENT + ["commit", "-m", "seed calc"], cwd=self.target)
+
+        class EditCodex(FakeCodex):
+            def _send(self, prompt, system_prompt="", **kw):
+                if "emit ONLY these blocks" in prompt:
+                    return _r(
+                        "Add a subtract function.\n"
+                        "=== EDIT: calc.py ===\n"
+                        "<<<<<<< SEARCH\n"
+                        "def add(a, b):\n    return a + b\n"
+                        "=======\n"
+                        "def add(a, b):\n    return a + b\n\n\n"
+                        "def subtract(a, b):\n    return a - b\n"
+                        ">>>>>>> REPLACE\n"
+                        "=== END EDIT ===", "codex")
+                return _r("Agreed.\n" + _CONSENSUS, "codex")
+
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude()
+        orch.codex = EditCodex()
+
+        state = orch.run("Add subtract to calc", self.target)
+        self.assertEqual(state.current_node, NodeType.DONE)
+        self.assertIn("calc.py", state.name_status)
+        self.assertTrue(state.verification_passed)
+        self.assertTrue(state.audit_results[-1].approved)
+        # Apply the tested edit into the (clean) existing repo.
+        orch.apply_on_approval(state)
+        self.assertIn("subtract", (self.target / "calc.py").read_text(encoding="utf-8"))
         orch.cleanup(state)
 
 
