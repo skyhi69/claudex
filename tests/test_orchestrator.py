@@ -185,6 +185,31 @@ class TestPipelineEndToEnd(unittest.TestCase):
         self.assertGreaterEqual(state.resolve_iteration, 1)   # resolve actually ran
         orch.cleanup(state)
 
+    def test_keyboard_interrupt_cleans_up_worktree(self):
+        # Ctrl+C mid-run must also clean up (the except catches BaseException).
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude()
+        orch.codex = FakeCodex()
+        with mock.patch.object(orch_mod, "run_build", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                orch.run("interrupt me", self.target)
+        listing = worktree._git(["worktree", "list"], cwd=self.target).stdout
+        self.assertNotIn("claudex_wt_", listing)
+
+    def test_applied_change_equals_tested_change(self):
+        # Core safety invariant: what lands in the project == what was built+tested
+        # in the worktree (Codex's "tested diff equals applied diff").
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude()
+        orch.codex = FakeCodex()
+        state = orch.run("Create a greeter", self.target)
+        self.assertEqual(state.current_node, NodeType.DONE)
+        tested = (state.stage_dir / "hello.py").read_text(encoding="utf-8")   # verified copy
+        orch.apply_on_approval(state)
+        applied = (self.target / "hello.py").read_text(encoding="utf-8")      # what landed
+        self.assertEqual(applied, tested)
+        orch.cleanup(state)
+
     def test_crash_mid_run_cleans_up_worktree(self):
         # If the pipeline throws after the worktree exists, it must NOT leak.
         orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
