@@ -66,8 +66,6 @@ def on_message(agent: str, role: str, content: str):
 def pick_project() -> Path:
     """Interactive project picker — list existing projects or create new."""
     console.print()
-    console.print(Rule("[bold magenta]Claudex[/bold magenta]", style="magenta"))
-    console.print()
 
     # Scan for existing projects
     projects = []
@@ -118,7 +116,7 @@ def pick_project() -> Path:
 def get_task() -> str:
     """Prompt user for the task if not provided as argument."""
     console.print()
-    task = Prompt.ask("[bold]What should we build?[/bold]")
+    task = Prompt.ask("[bold]What do you want to build?[/bold]")
     return task
 
 
@@ -280,19 +278,21 @@ def main(args=None):
 
     parsed = parser.parse_args(args)
 
-    # --- Interactive startup ---
+    # --- Interactive startup: decide WHAT to build first, then WHERE ---
+    if not (parsed.task and parsed.dir):
+        console.print()
+        console.print(Rule("[bold magenta]Claudex[/bold magenta]", style="magenta"))
 
-    # Pick project directory
-    if parsed.dir:
-        target_dir = parsed.dir.resolve()
-    else:
-        target_dir = pick_project()
-
-    # Get the task
     if parsed.task:
         task = parsed.task
     else:
         task = get_task()
+
+    # Pick an existing project, or create a new one (makes the folder for you).
+    if parsed.dir:
+        target_dir = parsed.dir.resolve()
+    else:
+        target_dir = pick_project()
 
     # --- Config ---
     config_path = parsed.config

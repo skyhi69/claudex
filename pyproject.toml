@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudex"
+version = "0.1.0"
+description = "Claudex — Claude (architect) + Codex (developer) collaborative coding agent"
+requires-python = ">=3.10"
+dependencies = ["pyyaml", "rich"]
+
+[project.scripts]
+claudex = "claudex.cli:main"
+
+[tool.setuptools]
+packages = ["claudex", "claudex.providers", "claudex.phases"]
