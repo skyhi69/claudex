@@ -61,6 +61,18 @@ class TestParse(unittest.TestCase):
         truncated = "=== FILE: a.py ===\nsome content\n(cut off)"
         self.assertEqual(parse_edits(truncated), [])
 
+    def test_markdown_fenced_block_still_parses(self):
+        # Codex often wraps output in ``` — the markers must still be found.
+        inner = _edit_block("a.py", "old", "new")
+        self.assertEqual(len(parse_edits("```\n" + inner + "\n```")), 1)
+        self.assertEqual(len(parse_edits("```python\n" + inner + "\n```")), 1)
+
+    def test_extra_whitespace_in_markers_tolerated(self):
+        text = "===  EDIT:  a.py  ===\n<<<<<<<  SEARCH\nold\n=======\nnew\n>>>>>>>  REPLACE\n===  END EDIT  ==="
+        ops = parse_edits(text)
+        self.assertEqual(len(ops), 1)
+        self.assertEqual(ops[0].path, "a.py")
+
 
 class TestApply(unittest.TestCase):
 
@@ -121,6 +133,15 @@ class TestApply(unittest.TestCase):
         self.assertFalse(res.ok)
         # First (valid) edit must NOT have been written.
         self.assertEqual((self.base / "a.py").read_text(encoding="utf-8"), "x = 1\n")
+
+    def test_apply_across_two_files(self):
+        self._write("a.py", "A1\n")
+        self._write("b.py", "B1\n")
+        text = _edit_block("a.py", "A1", "A2") + "\n" + _edit_block("b.py", "B1", "B2")
+        res = apply_edits(parse_edits(text), self.base)
+        self.assertTrue(res.ok)
+        self.assertEqual((self.base / "a.py").read_text(encoding="utf-8"), "A2\n")
+        self.assertEqual((self.base / "b.py").read_text(encoding="utf-8"), "B2\n")
 
     def test_sequential_edits_same_file(self):
         self._write("a.py", "a\nb\nc\n")
