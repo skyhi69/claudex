@@ -107,6 +107,23 @@ class TestWorktree(unittest.TestCase):
         self.assertNotIn(".serena", diff)
         self.assertNotIn("__pycache__", names)
 
+    def test_stage_diff_no_error_when_artifact_is_gitignored(self):
+        # Regression (found by the Wave 2B benchmark): on an EXISTING repo whose
+        # .gitignore lists .serena/, a .serena dir in the worktree must not make
+        # stage_diff crash (the old explicit-pathspec excludes errored on it).
+        worktree.ensure_repo(self.target)
+        (self.target / ".gitignore").write_text(".serena/\n__pycache__/\n", encoding="utf-8")
+        worktree._git(["add", ".gitignore"], cwd=self.target)
+        worktree._git(worktree._IDENT + ["commit", "-m", "gitignore"], cwd=self.target)
+        stage = worktree.create_worktree(self.target, "sess_ignored")
+        (stage / "real.py").write_text("x = 1\n", encoding="utf-8")
+        (stage / ".serena").mkdir()
+        (stage / ".serena" / "x.txt").write_text("junk", encoding="utf-8")
+        diff = worktree.stage_diff(stage)        # must NOT raise
+        worktree.remove_worktree(self.target, stage)
+        self.assertIn("real.py", diff)
+        self.assertNotIn(".serena", diff)
+
     def test_apply_empty_patch_is_noop_success(self):
         worktree.ensure_repo(self.target)
         self.assertTrue(worktree.apply_patch(self.target, "   "))
