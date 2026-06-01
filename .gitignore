@@ -6,3 +6,6 @@ __pycache__/
 test-project/
 .serena/
 .codegraph/
+*.egg-info/
+build/
+dist/
