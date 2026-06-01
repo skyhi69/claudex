@@ -140,18 +140,20 @@ def commit_stage(stage, message: str = "claudex: proposed changes") -> bool:
 
 
 # Build artifacts that verification (pytest/py_compile) or tooling create in the
-# worktree — must never enter the tested diff that gets applied to the project.
-_DIFF_EXCLUDES = [
-    ":(exclude,glob)**/__pycache__/**",
-    ":(exclude,glob)**/*.pyc",
-    ":(exclude,glob)**/.pytest_cache/**",
-    ":(exclude,glob)**/.mypy_cache/**",
-    ":(exclude,glob).serena/**",
+# worktree — must never enter the tested diff. We can't pass these as `git add`
+# exclude pathspecs: an exclude combined with the base `.` pathspec makes git
+# ERROR on paths already gitignored in an existing repo. Instead: plain `add`
+# (respects the repo's .gitignore, never errors) then unstage these globs to
+# cover the greenfield case where they are not gitignored.
+_ARTIFACT_GLOBS = [
+    "**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**",
+    "**/.mypy_cache/**", ".serena/**",
 ]
 
 
 def _stage_all(stage) -> None:
-    _git(["add", "-A", "--", ".", *_DIFF_EXCLUDES], cwd=stage)
+    _git(["add", "-A"], cwd=stage)
+    _git(["reset", "-q", "--", *[f":(glob){g}" for g in _ARTIFACT_GLOBS]], cwd=stage, check=False)
 
 
 def stage_diff(stage) -> str:
