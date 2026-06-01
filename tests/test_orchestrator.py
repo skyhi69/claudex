@@ -210,6 +210,85 @@ class TestPipelineEndToEnd(unittest.TestCase):
         self.assertEqual(applied, tested)
         orch.cleanup(state)
 
+    def test_build_reprompt_loop_recovers(self):
+        # First edit's SEARCH doesn't match -> apply fails -> run_build re-prompts
+        # -> second edit applies. Exercises the re-prompt path through the pipeline.
+        worktree.ensure_repo(self.target)
+        (self.target / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        worktree._git(["add", "-A"], cwd=self.target)
+        worktree._git(worktree._IDENT + ["commit", "-m", "seed"], cwd=self.target)
+
+        class RepromptCodex(FakeCodex):
+            def __init__(self):
+                super().__init__()
+                self.build_calls = 0
+
+            def _send(self, prompt, system_prompt="", **kw):
+                if "emit ONLY these blocks" in prompt:
+                    self.build_calls += 1
+                    if self.build_calls == 1:
+                        return _r("=== EDIT: calc.py ===\n<<<<<<< SEARCH\nNOT PRESENT\n"
+                                  "=======\nx\n>>>>>>> REPLACE\n=== END EDIT ===", "codex")
+                    return _r("=== EDIT: calc.py ===\n<<<<<<< SEARCH\n"
+                              "def add(a, b):\n    return a + b\n=======\n"
+                              "def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return a - b\n"
+                              ">>>>>>> REPLACE\n=== END EDIT ===", "codex")
+                return _r("Agreed.\n" + _CONSENSUS, "codex")
+
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude(complexity="simple")
+        orch.codex = RepromptCodex()
+        state = orch.run("add sub", self.target)
+        self.assertEqual(state.current_node, NodeType.DONE)
+        self.assertGreaterEqual(orch.codex.build_calls, 2)     # it re-prompted
+        self.assertTrue(state.verification_passed)
+        orch.cleanup(state)
+
+    def test_empty_diff_fails_gracefully(self):
+        # Codex "edits" produce no net change -> orchestrator must FAILED, not hang.
+        worktree.ensure_repo(self.target)
+        (self.target / "x.py").write_text("y = 1\n", encoding="utf-8")
+        worktree._git(["add", "-A"], cwd=self.target)
+        worktree._git(worktree._IDENT + ["commit", "-m", "seed"], cwd=self.target)
+
+        class NoopCodex(FakeCodex):
+            def _send(self, prompt, system_prompt="", **kw):
+                if "emit ONLY these blocks" in prompt:
+                    return _r("=== FILE: x.py ===\ny = 1\n\n=== END FILE ===", "codex")  # identical
+                return _r("Agreed.\n" + _CONSENSUS, "codex")
+
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude(complexity="simple")
+        orch.codex = NoopCodex()
+        state = orch.run("noop", self.target)
+        self.assertEqual(state.current_node, NodeType.FAILED)
+        orch.cleanup(state)
+
+    def test_auto_git_init_disabled_fails_gracefully(self):
+        # Greenfield + auto_git_init off -> ensure_repo cannot init -> graceful FAILED.
+        orch = Orchestrator(ClaudexConfig(auto_git_init=False), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude(complexity="simple")
+        orch.codex = FakeCodex()
+        state = orch.run("Create a greeter", self.target)  # self.target is empty/greenfield
+        self.assertEqual(state.current_node, NodeType.FAILED)
+
+    def test_path_escape_edit_rejected_through_pipeline(self):
+        # Codex emits an escaping path -> apply rejects every attempt -> FAILED, and
+        # nothing is written outside the target (confinement holds end-to-end).
+        class EvilCodex(FakeCodex):
+            def _send(self, prompt, system_prompt="", **kw):
+                if "emit ONLY these blocks" in prompt:
+                    return _r("=== FILE: ..\\..\\evil.txt ===\npwned\n=== END FILE ===", "codex")
+                return _r("Agreed.\n" + _CONSENSUS, "codex")
+
+        orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
+        orch.claude = FakeClaude(complexity="simple")
+        orch.codex = EvilCodex()
+        state = orch.run("escape", self.target)
+        self.assertEqual(state.current_node, NodeType.FAILED)
+        self.assertFalse((self.target.parent / "evil.txt").exists())
+        orch.cleanup(state)
+
     def test_crash_mid_run_cleans_up_worktree(self):
         # If the pipeline throws after the worktree exists, it must NOT leak.
         orch = Orchestrator(ClaudexConfig(), ROLES, on_message=lambda *a: None)
