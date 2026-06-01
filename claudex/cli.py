@@ -277,6 +277,11 @@ def main(args=None):
         default=None,
         help="Override max resolution iterations",
     )
+    parser.add_argument(
+        "--codegraph",
+        action="store_true",
+        help="Enable CodeGraph grounding (requires the codegraph CLI + an indexed project)",
+    )
 
     parsed = parser.parse_args(args)
 
@@ -312,6 +317,8 @@ def main(args=None):
         config.planning_max_rounds = parsed.max_rounds
     if parsed.max_iterations:
         config.resolve_max_iterations = parsed.max_iterations
+    if parsed.codegraph:
+        config.use_codegraph = True
 
     # Find roles directory
     roles_dir = CLAUDEX_HOME / "roles"

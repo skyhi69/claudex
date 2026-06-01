@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from . import worktree
+from . import codegraph, worktree
 from .build import run_build, record_build
 from .config import ClaudexConfig
 from .memory import save_session, auto_learn
@@ -89,10 +89,22 @@ class Orchestrator:
         return state
 
     def _handle_analyze(self, state: SessionState) -> SessionState:
-        """Phase 1: Analyze the task."""
+        """Phase 1: Analyze the task (optionally grounded by CodeGraph)."""
         self.on_message("system", "Claudex", "Phase 1: Analyzing task...")
 
-        state.analysis = run_analysis(state, self.claude)
+        if self.config.use_codegraph and codegraph.available(
+                state.target_dir, timeout=self.config.codegraph_timeout):
+            self.on_message("system", "Claudex", "Grounding with CodeGraph (indexed repo)...")
+            raw = codegraph.get_context(
+                state.task, state.target_dir,
+                max_nodes=self.config.codegraph_max_nodes,
+                max_chars=self.config.codegraph_max_chars,
+                timeout=self.config.codegraph_timeout,
+                sync_first=self.config.codegraph_sync,
+            )
+            state.repo_context = codegraph.as_untrusted_block(raw)
+
+        state.analysis = run_analysis(state, self.claude, repo_context=state.repo_context)
 
         self.on_message("system", "Claudex", f"Task complexity: {state.analysis.complexity}")
         self.on_message("system", "Claudex", f"Claude role: {state.analysis.claude_role}")
@@ -155,7 +167,7 @@ class Orchestrator:
         build = run_build(
             state.stage_dir,
             state.plan.agreed_plan if state.plan else "",
-            state.analysis.project_context if state.analysis else "",
+            state.grounded_context(),
             self.codex,
             configured_test=self.config.test_command,
             on_message=self.on_message,

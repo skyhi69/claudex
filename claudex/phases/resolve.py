@@ -37,7 +37,7 @@ def run_resolution(
         build = run_build(
             state.stage_dir,
             state.plan.agreed_plan if state.plan else "",
-            state.analysis.project_context if state.analysis else "",
+            state.grounded_context(),
             codex,
             configured_test=configured_test,
             feedback=feedback,

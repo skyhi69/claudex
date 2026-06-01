@@ -51,7 +51,7 @@ def _detect_complexity(text: str) -> str:
     return "moderate"
 
 
-def run_analysis(state: SessionState, claude: LLMProvider) -> AnalysisResult:
+def run_analysis(state: SessionState, claude: LLMProvider, repo_context: str = "") -> AnalysisResult:
     """Analyze the task, detect required expertise, scan project context.
 
     This phase uses Claude to understand the task and determine what
@@ -66,6 +66,9 @@ def run_analysis(state: SessionState, claude: LLMProvider) -> AnalysisResult:
 
     # Load memory — lightweight, relevance-scored
     memory_context = load_project_context(state.target_dir)
+
+    # repo_context arrives already wrapped in an untrusted-data boundary.
+    codegraph_section = f"\n{repo_context}\n" if repo_context else ""
 
     relevant = select_relevant_lessons(
         state.task, state.target_dir,
@@ -82,7 +85,7 @@ TASK: {state.task}
 
 PROJECT CONTEXT:
 {project_context}
-{memory_context}
+{codegraph_section}{memory_context}
 {lessons_section}
 
 DETECTED EXPERTISE NEEDED: {role_desc}

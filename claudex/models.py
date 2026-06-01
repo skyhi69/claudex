@@ -128,6 +128,9 @@ class SessionState:
     audit_results: list[AuditResult] = field(default_factory=list)
     decision_brief: Optional[DecisionBrief] = None
 
+    # Wave 2B optional CodeGraph grounding markdown (enrichment, empty when off).
+    repo_context: str = ""
+
     # Wave 2A grounded-build state — the worktree, its tested diff, and evidence.
     stage_dir: Optional[Path] = None
     diff: str = ""
@@ -151,3 +154,11 @@ class SessionState:
         self.transcript.append(
             DebateMessage(agent=agent, role=role, content=content)
         )
+
+    def grounded_context(self) -> str:
+        """Project context plus the optional CodeGraph grounding (already wrapped
+        in an untrusted-data boundary upstream)."""
+        base = self.analysis.project_context if self.analysis else ""
+        if self.repo_context:
+            return f"{base}\n\n{self.repo_context}"
+        return base
